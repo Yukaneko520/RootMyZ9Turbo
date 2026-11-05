@@ -14,6 +14,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -38,6 +40,8 @@ internal fun TimerExecutionSheet(
     state: TimerUiState,
     actions: TimerActions,
 ) {
+    // The popup host retains its slots; read the latest state inside those slots.
+    val latestState by rememberUpdatedState(state)
     OverlayBottomSheet(
         show = state.executionSheetVisible,
         title = stringResource(R.string.log_title),
@@ -54,7 +58,7 @@ internal fun TimerExecutionSheet(
         },
         endAction = {
             IconButton(
-                enabled = state.executionSheetDismissible,
+                enabled = latestState.executionSheetDismissible,
                 onClick = actions::onCloseExecutionSheet,
             ) {
                 Icon(
@@ -65,7 +69,7 @@ internal fun TimerExecutionSheet(
         },
         content = {
             LogPanel(
-                lines = state.logLines,
+                lines = latestState.logLines,
                 modifier = Modifier
                     .fillMaxWidth()
                     .heightIn(min = 240.dp, max = 520.dp)
