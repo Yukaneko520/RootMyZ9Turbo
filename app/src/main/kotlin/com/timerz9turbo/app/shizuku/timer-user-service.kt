@@ -18,10 +18,8 @@ class TimerUserService(private val context: Context) : ITimerUserService.Stub() 
             val resolved = requireNotNull(ManagerScanner.resolveKsud(context.packageManager, managerPackage)) {
                 "No unambiguous ksud daemon found in the selected root manager"
             }
-            val daemon = if (resolved.file.name == "libksud.so") resolved.file else {
-                KsudLibrary.stage(resolved.file, File("/data/local/tmp/ksud")).also {
-                    callback.onLog("<s> ksud copied: ${resolved.file.absolutePath} -> ${it.absolutePath}")
-                }
+            val daemon = KsudLibrary.stage(resolved.file, File("/data/local/tmp/ksud")).also {
+                callback.onLog("<s> ksud copied: ${resolved.file.absolutePath} -> ${it.absolutePath}")
             }
             require(daemon.canExecute()) { "ksud is not executable: ${daemon.absolutePath}" }
             File("/data/local/tmp/su_manager_pkg").writeText(resolved.packageName + "\n")
