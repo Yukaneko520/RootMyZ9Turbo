@@ -77,12 +77,11 @@ internal fun ActivationStatusCard(
         shizukuStatus == ShizukuStatus.PERMISSION_REQUIRED -> R.string.shizuku_status_permission_required
         else -> R.string.shizuku_status_not_running
     }
-    // Tap re-runs the Shizuku flow (open app / request permission); no-op when READY.
     Card(
         modifier = modifier,
         colors = CardDefaults.defaultColors(color = backgroundColor),
-        onClick = onShizukuClick,
-        showIndication = true,
+        onClick = if (supported && !accessReady) onShizukuClick else null,
+        showIndication = supported && !accessReady,
         pressFeedbackType = PressFeedbackType.Tilt,
     ) {
         Box(
