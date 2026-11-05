@@ -122,7 +122,7 @@ private fun ControlPanel(
                 ?: state.selectedManagerPackage
             ArrowPreference(
                 title = stringResource(R.string.manager_label),
-                summary = chosenLabel ?: stringResource(R.string.manager_summary_auto),
+                summary = chosenLabel ?: stringResource(R.string.manager_select),
                 onClick = actions::onOpenManagerPicker,
             )
             SwitchPreference(

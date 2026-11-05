@@ -16,7 +16,7 @@ class TimerUserService(private val context: Context) : ITimerUserService.Stub() 
         execute(callback) {
             val timer = installTimer()
             val resolved = requireNotNull(ManagerScanner.resolveKsud(context.packageManager, managerPackage)) {
-                "No unambiguous ksud daemon found in the installed SU managers"
+                "No unambiguous ksud daemon found in the selected root manager"
             }
             val daemon = if (resolved.file.name == "libksud.so") resolved.file else {
                 KsudLibrary.stage(resolved.file, File("/data/local/tmp/ksud")).also {

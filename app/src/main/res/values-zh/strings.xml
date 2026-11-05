@@ -30,8 +30,7 @@
     <string name="shizuku_status_permission_required">请在弹窗中授予 Shizuku 权限</string>
     <string name="shizuku_status_ready">Shizuku 已就绪</string>
     <string name="manager_label">根管理器</string>
-    <string name="manager_summary_auto">请选择 Root 管理器</string>
-    <string name="manager_picker_title">选择根管理器</string>
+    <string name="manager_select">请选择 Root 管理器</string>
     <string name="manager_picker_empty">未找到应用</string>
     <string name="manager_no_ksud">无法识别 ksud</string>
     <string name="manager_show_all">显示全部应用</string>
@@ -41,6 +40,5 @@
     <string name="debug_export_location">保存位置</string>
     <string name="debug_export_location_unsupported">请选择内部存储中的文件夹（例如 Download）</string>
     <string name="diagnose_summary">跟踪 ID 和移植诊断（不触发 UAF）</string>
-    <string name="su_required">请选择 Root 管理器</string>
     <string name="diagnose">诊断</string>
 </resources>

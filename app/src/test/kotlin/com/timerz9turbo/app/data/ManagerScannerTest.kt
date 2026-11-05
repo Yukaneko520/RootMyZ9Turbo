@@ -13,29 +13,6 @@ class ManagerScannerTest {
     ) = Candidate(pkg, label, hasKsud, builtin)
 
     @Test
-    fun `resolvePackages keeps builtin order when nothing chosen`() {
-        assertEquals(ManagerScanner.BUILTIN, ManagerScanner.resolvePackages(null))
-        assertEquals(ManagerScanner.BUILTIN, ManagerScanner.resolvePackages(""))
-        assertEquals(ManagerScanner.BUILTIN, ManagerScanner.resolvePackages("  "))
-    }
-
-    @Test
-    fun `resolvePackages puts chosen builtin first`() {
-        assertEquals(
-            listOf("me.weishu.kernelsu", "me.weishu.kernelsu.pr", "com.resukisu.resukisu", "org.bakasu.bakasu", "com.kowx712.supermanager", "com.sukisu.ultra"),
-            ManagerScanner.resolvePackages("me.weishu.kernelsu"),
-        )
-    }
-
-    @Test
-    fun `resolvePackages puts chosen custom package first`() {
-        assertEquals(
-            listOf("custom.pkg") + ManagerScanner.BUILTIN,
-            ManagerScanner.resolvePackages("custom.pkg"),
-        )
-    }
-
-    @Test
     fun `sort puts compatible builtins first then compatible then label order`() {
         val sorted = listOf(
             candidate("z.app", hasKsud = false, label = "Zeta"),

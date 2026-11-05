@@ -46,11 +46,10 @@ internal fun TimerManagerPickerSheet(
 ) {
     OverlayBottomSheet(
         show = state.managerPickerVisible,
-        title = stringResource(R.string.manager_picker_title),
+        title = stringResource(R.string.manager_select),
         onDismissRequest = actions::onCloseManagerPicker,
         content = {
             var showAll by remember { mutableStateOf(false) }
-            // Allow clearing a saved selection even when its manager was uninstalled.
             LazyColumn(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -58,14 +57,6 @@ internal fun TimerManagerPickerSheet(
                     .navigationBarsPadding()
                     .selectableGroup(),
             ) {
-                item {
-                    ManagerPickerRow(
-                        title = stringResource(R.string.manager_summary_auto),
-                        subtitle = null,
-                        icon = null,
-                        selected = state.selectedManagerPackage == null,
-                    ) { actions.onManagerSelected(null) }
-                }
                 if (state.managerCandidates.isEmpty()) {
                     item {
                         Text(

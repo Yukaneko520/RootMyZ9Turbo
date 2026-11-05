@@ -21,6 +21,8 @@ JDK 25 toolchain. APKs are under `build/app/outputs/apk/release/`.
 
 - `TimerViewModel` and `TimerRepository` coordinate the app through Shizuku.
 - `TimerUserService` stages the selected Timer asset and resolves ksud.
+- A root manager must be selected explicitly; an unavailable selection is not
+  replaced automatically by a different installed manager.
 - `KsudLibrary` prefers `libksud.so`; otherwise it requires one matching
   ARM64 ELF payload before copying it to `/data/local/tmp/ksud`.
 - Executables are installed by temporary-file rename. Manager/debug preferences

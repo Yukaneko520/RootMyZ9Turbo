@@ -31,8 +31,7 @@
     <string name="shizuku_status_permission_required">Grant Shizuku access when asked</string>
     <string name="shizuku_status_ready">Shizuku ready</string>
     <string name="manager_label">Root manager</string>
-    <string name="manager_summary_auto">Select a root manager</string>
-    <string name="manager_picker_title">Choose root manager</string>
+    <string name="manager_select">Select Root Manager</string>
     <string name="manager_picker_empty">No apps found</string>
     <string name="manager_no_ksud">Could not identify ksud</string>
     <string name="manager_show_all">Show all apps</string>
@@ -43,5 +42,4 @@
     <string name="debug_export_location_unsupported">Pick a folder on internal storage (e.g. Download)</string>
     <string name="diagnose">Diagnose</string>
     <string name="diagnose_summary">Trace ids + porting diag (no UAF, safe to run)</string>
-    <string name="su_required">Select a SU Manager</string>
 </resources>

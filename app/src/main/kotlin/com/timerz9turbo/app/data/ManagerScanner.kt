@@ -8,7 +8,7 @@ import java.io.File
 object ManagerScanner {
     const val PREF_KEY = "manager_package"
 
-    /** Built-in KernelSU-family managers, priority order. */
+    /** Known KernelSU-family managers, prioritized in the picker. */
     val BUILTIN = listOf(
         "me.weishu.kernelsu.pr",
         "me.weishu.kernelsu",
@@ -52,19 +52,14 @@ object ManagerScanner {
         .thenByDescending { it.hasKsud }
         .thenBy { it.label.lowercase() }
 
-    /** Chosen package first, then the rest of the built-ins in priority order. */
-    fun resolvePackages(chosen: String?): List<String> =
-        if (chosen.isNullOrBlank()) BUILTIN
-        else listOf(chosen) + BUILTIN.filter { it != chosen }
-
     data class ResolvedKsud(val packageName: String, val file: File)
 
-    /** Keep the actual package together with its daemon, including on fallback. */
-    fun resolveKsud(pm: PackageManager, chosen: String?): ResolvedKsud? =
-        resolvePackages(chosen).firstNotNullOfOrNull { packageName ->
-            runCatching {
-                KsudLibrary.find(pm.getApplicationInfo(packageName, 0).nativeLibraryDir)
-                    ?.let { ResolvedKsud(packageName, it) }
-            }.getOrNull()
-        }
+    /** Never substitute another manager for the user's explicit selection. */
+    fun resolveKsud(pm: PackageManager, chosen: String?): ResolvedKsud? {
+        val packageName = chosen?.takeIf { it.isNotBlank() } ?: return null
+        return runCatching {
+            KsudLibrary.find(pm.getApplicationInfo(packageName, 0).nativeLibraryDir)
+                ?.let { ResolvedKsud(packageName, it) }
+        }.getOrNull()
+    }
 }

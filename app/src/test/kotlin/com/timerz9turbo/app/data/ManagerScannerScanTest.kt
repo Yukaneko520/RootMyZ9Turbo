@@ -6,6 +6,7 @@ import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -124,12 +125,28 @@ class ManagerScannerScanTest {
     }
 
     @Test
-    fun `resolve records fallback package rather than the unavailable selection`() {
+    fun `resolve does not substitute another installed manager for an unavailable selection`() {
         val dir = install("com.sukisu.ultra", system = false, ksud = false)
-        val daemon = writeRenamedDaemon(dir, "libfdbqiupsrx.so")
+        writeRenamedDaemon(dir, "libfdbqiupsrx.so")
+        assertNull(ManagerScanner.resolveKsud(pm, "com.example.uninstalled"))
+    }
+
+    @Test
+    fun `resolve requires an explicit manager even when a compatible one is installed`() {
+        install("me.weishu.kernelsu", system = false, ksud = true)
+        assertNull(ManagerScanner.resolveKsud(pm, null))
+        assertNull(ManagerScanner.resolveKsud(pm, ""))
+        assertNull(ManagerScanner.resolveKsud(pm, "  "))
+    }
+
+    @Test
+    fun `resolve uses the selected custom manager rather than a known manager`() {
+        install("me.weishu.kernelsu", system = false, ksud = true)
+        val dir = install("custom.manager", system = false, ksud = false)
+        val daemon = writeRenamedDaemon(dir, "librandom.so")
         assertEquals(
-            ManagerScanner.ResolvedKsud("com.sukisu.ultra", daemon),
-            ManagerScanner.resolveKsud(pm, "com.example.uninstalled"),
+            ManagerScanner.ResolvedKsud("custom.manager", daemon),
+            ManagerScanner.resolveKsud(pm, "custom.manager"),
         )
     }
 }

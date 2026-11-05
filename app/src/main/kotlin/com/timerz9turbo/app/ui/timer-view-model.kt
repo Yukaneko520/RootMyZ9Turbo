@@ -62,7 +62,7 @@ class TimerViewModel(private val repository: TimerRepository) : ViewModel(), Tim
         if (!diagnose && !current.kernelSupported) return
         if (current.shizukuStatus != ShizukuStatus.READY) { onStatusClick(); return }
         if (!diagnose && current.selectedManagerPackage.isNullOrBlank()) {
-            send(TimerEffect.Toast(R.string.su_required))
+            send(TimerEffect.Toast(R.string.manager_select))
             return
         }
         mutableState.update { it.copy(running = true, executionSheetVisible = true, executionSheetDismissible = false) }
