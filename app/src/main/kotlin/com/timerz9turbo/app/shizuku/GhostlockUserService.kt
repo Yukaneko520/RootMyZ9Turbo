@@ -84,6 +84,12 @@ class GhostlockUserService(private val context: Context) : IGhostlockUserService
                     .firstOrNull { it != null }
                 // Persist choice for ksu_stage.sh (reads flag file, no hardcode).
                 File("/data/local/tmp/su_manager_pkg").writeText((chosen ?: "") + "\n")
+                // Exact ksud path (PackageManager-resolved): pm(1) has no binder access in kernel context.
+                runCatching {
+                    val ksudFlag = File("/data/local/tmp/ksud_path")
+                    if (ksudPath != null) ksudFlag.writeText(ksudPath.absolutePath + "\n")
+                    else if (ksudFlag.exists()) ksudFlag.delete()
+                }
                 if (chosen != null) callback.onLog("<s> SU manager selected: $chosen") else callback.onLog("<s> SU manager: auto-detect (${ManagerScanner.BUILTIN.joinToString()})")
                 ksudPath?.let { callback.onLog("<s> ksud resolved: ${it.absolutePath}") }
         
