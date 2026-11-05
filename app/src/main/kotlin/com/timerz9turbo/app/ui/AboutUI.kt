@@ -120,7 +120,7 @@ internal fun AboutScreen(onBack: () -> Unit) {
                                 contentAlignment = Alignment.Center,
                             ) {
                                 Image(
-                                    painter = painterResource(R.drawable.ic_launcher_foreground),
+                                painter = painterResource(R.mipmap.ic_launcher),
                                     contentDescription = null,
                                     modifier = Modifier.requiredSize(132.dp),
                                 )
@@ -195,16 +195,6 @@ internal fun AboutScreen(onBack: () -> Unit) {
             item(key = "shizuku") {
                 AboutLink("Shizuku", "github.com/RikkaApps/Shizuku") {
                     uriHandler.openUri("https://github.com/RikkaApps/Shizuku")
-                }
-            }
-            item(key = "config") {
-                AboutLink("Typesafe Config", "github.com/lightbend/config") {
-                    uriHandler.openUri("https://github.com/lightbend/config")
-                }
-            }
-            item(key = "compress") {
-                AboutLink("Apache Commons Compress", "commons.apache.org/proper/commons-compress") {
-                    uriHandler.openUri("https://commons.apache.org/proper/commons-compress/")
                 }
             }
             item(key = "copyright") {

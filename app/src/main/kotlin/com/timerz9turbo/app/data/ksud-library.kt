@@ -2,6 +2,7 @@ package com.timerz9turbo.app.data
 
 import java.io.DataInputStream
 import java.io.File
+import java.io.InputStream
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption.ATOMIC_MOVE
 import java.nio.file.StandardCopyOption.REPLACE_EXISTING
@@ -52,10 +53,13 @@ object KsudLibrary {
     }.getOrDefault(false)
 
     /** Same-directory rename keeps Timer from observing a partially copied daemon. */
-    fun stage(source: File, destination: File): File {
+    fun stage(source: File, destination: File): File = source.inputStream().use { stage(it, destination) }
+
+    @Suppress("SetWorldReadable") // Public APK executable, mode 0755; only its owner can write.
+    fun stage(input: InputStream, destination: File): File {
         val temporary = File(destination.absolutePath + ".new")
         try {
-            source.inputStream().use { input -> temporary.outputStream().use { output -> input.copyTo(output) } }
+            temporary.outputStream().use { output -> input.copyTo(output) }
             check(temporary.setReadable(true, false)) { "Cannot make ksud readable" }
             check(temporary.setWritable(false, false) && temporary.setWritable(true, true)) {
                 "Cannot set ksud write permissions"

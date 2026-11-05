@@ -1,0 +1,36 @@
+# TimerZ9Turbo
+
+Android app for the Timer backend on Vivo/iQOO PD2352/V2352 devices. Requires
+Shizuku running as shell (uid 2000) and an installed SU manager. The app ships
+ARM64 Timer binaries for the existing 6.1.124/6.1.145 kernel mapping.
+
+Features: manager selection, safemode, Timer execution/diagnostics, log export,
+and About. Kernel profile editing, offsets extraction and OTA parsing are not
+part of this app.
+
+## Build and verify
+
+```powershell
+.\gradlew.bat :app:testDebugUnitTest :app:lintDebug :app:assembleRelease --no-configuration-cache
+```
+
+Uses the existing Android SDK configuration in ignored `local.properties` and
+JDK 25 toolchain. APKs are under `build/app/outputs/apk/release/`.
+
+## Runtime
+
+- `TimerViewModel` and `TimerRepository` coordinate the app through Shizuku.
+- `TimerUserService` stages the selected Timer asset and resolves ksud.
+- `KsudLibrary` prefers `libksud.so`; otherwise it requires one matching
+  ARM64 ELF payload before copying it to `/data/local/tmp/ksud`.
+- Executables are installed by temporary-file rename. Manager/debug preferences
+  retain their existing storage key; existing saved user documents are untouched.
+- Build 6 uses Timer-only AIDL and a new service component, replacing ignored
+  CPU/profile/force-attack arguments and the obsolete status callback.
+
+Native source is maintained separately at `../timer-native`; this cleanup does
+not modify either executable or kernel offsets. Content detection and host
+tests do not validate an on-device exploit run.
+
+The UI derives from GhostLock; upstream attribution and license links remain
+in About. See [changelog](docs/project-changelog.md).

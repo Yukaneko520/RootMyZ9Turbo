@@ -23,10 +23,7 @@ internal class DebugAttackLog private constructor(
     val folderPath: String,
     private val writer: BufferedWriter,
 ) : Closeable {
-    /**
-     * Absolute folder handed to the native process through --dump-kernel-log;
-     * the root prepare script drops kernel/pstore/iomem dumps next to the log.
-     */
+    /** Absolute destination for Timer log copies. */
     @Suppress("DEPRECATION")
     val folderFile: File
         get() = File(Environment.getExternalStorageDirectory(), folderPath)
@@ -38,30 +35,6 @@ internal class DebugAttackLog private constructor(
         writer.flush()
     }
 
-    /**
-     * Writes an extra file next to the attempt log (e.g. the resolved runtime
-     * profile), through MediaStore so it is visible without a storage permission.
-     */
-    @Synchronized
-    fun writeSidecar(name: String, bytes: ByteArray): Boolean {
-        val values = ContentValues().apply {
-            put(MediaStore.MediaColumns.DISPLAY_NAME, name)
-            put(MediaStore.MediaColumns.MIME_TYPE, "application/octet-stream")
-            put(MediaStore.MediaColumns.RELATIVE_PATH, folderPath)
-        }
-        val uri = context.contentResolver
-            .insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: return false
-        return runCatching {
-            context.contentResolver.openOutputStream(uri, "w")?.use { output ->
-                output.write(bytes)
-                output.flush()
-            }
-            MediaScannerConnection.scanFile(
-                context, arrayOf(File(folderFile, name).absolutePath), null, null,
-            )
-        }.isSuccess
-    }
-
     @Synchronized
     override fun close() {
         writer.close()
@@ -70,16 +43,7 @@ internal class DebugAttackLog private constructor(
 
     /** Ask MediaStore to index the root-written dumps so file managers show them. */
     private fun publishSidecars() {
-        val paths = buildList {
-            for (name in SidecarNames) {
-                val file = File(folderFile, name)
-                if (file.isFile) add(file.absolutePath)
-            }
-            val pstore = folderFile.resolve("pstore")
-            if (pstore.isDirectory) {
-                pstore.listFiles()?.forEach { if (it.isFile) add(it.absolutePath) }
-            }
-        }
+        val paths = folderFile.listFiles().orEmpty().filter { it.isFile }.map { it.absolutePath }
         if (paths.isEmpty()) return
         runCatching {
             MediaScannerConnection.scanFile(context, paths.toTypedArray(), null, null)
@@ -87,10 +51,6 @@ internal class DebugAttackLog private constructor(
     }
 
     companion object {
-        private val SidecarNames = listOf(
-            "kernel-dmesg.log", "kernel-info.txt", "iomem.txt",
-            "ksu.log",
-        )
         private val sequence = AtomicLong()
 
         fun open(context: Context, entry: String, folder: String): DebugAttackLog? {

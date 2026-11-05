@@ -8,7 +8,6 @@ class FormatLogUseCase {
         val text = stripAnsi(if (line.endsWith('\n')) line else "$line\n")
         val body = text.replaceFirst(sourceTag, "")
         val marker = body.getOrNull(1).takeIf { body.startsWith('[') && body.getOrNull(2) == ']' }
-        val message = body.replace(leadingTags, "").removePrefix("=== ")
         val tagged = text
             .removePrefix("<-> ")
             .removePrefix("<b> ")
@@ -28,7 +27,6 @@ class FormatLogUseCase {
                 if (tagged.startsWith("result:")) resultTone(tagged) else LogTone.Kotlin
 
             tagged.startsWith("result:") -> resultTone(tagged)
-            isWriteRound(message) -> if (marker == '-' || marker == '!') LogTone.Error else LogTone.Progress
             isTimerMilestone(tagged) -> LogTone.Success
             isTimerSoftFail(tagged) -> LogTone.Warning
             isTimerProgress(tagged) -> LogTone.Progress
@@ -42,7 +40,6 @@ class FormatLogUseCase {
         return LogEntry(text, tone)
     }
 
-    private fun isWriteRound(message: String): Boolean = listOf("W1", "W2", "W3", "Write 1").any(message::startsWith)
 
     /* Timer binary vocabulary: [+] is routine progress, milestones are explicit. */
     private fun isTimerMilestone(line: String): Boolean = listOf(
@@ -75,6 +72,5 @@ class FormatLogUseCase {
     private companion object {
         val ansi = Regex("\\u001B\\[[;\\d]*m")
         val sourceTag = Regex("^\\[[a-z]+]\\s+")
-        val leadingTags = Regex("^(\\[[^]]+]\\s*)+")
     }
 }

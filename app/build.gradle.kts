@@ -17,7 +17,7 @@ layout.buildDirectory.set(rootProject.layout.buildDirectory.dir("app"))
 val appName = "TimerZ9Turbo"
 val appVersionName = "1.0"
 
-val appVersionCode = 5
+val appVersionCode = 6
 
 val buildInfoSrc = layout.buildDirectory.dir("generated/source/buildInfo")
 
@@ -168,15 +168,12 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.13.0")
     implementation("androidx.compose.foundation:foundation:1.12.1")
     implementation("androidx.compose.material:material-icons-extended:1.7.8")
-    implementation("com.typesafe:config:1.4.9")
-    implementation("org.apache.commons:commons-compress:1.28.0")
     implementation("dev.rikka.shizuku:api:13.1.5")
     implementation("dev.rikka.shizuku:provider:13.1.5")
     implementation("top.yukonga.miuix.kmp:miuix-ui:0.9.4")
     implementation("top.yukonga.miuix.kmp:miuix-nav:0.9.4")
     implementation("top.yukonga.miuix.kmp:miuix-icons:0.9.4")
     implementation("top.yukonga.miuix.kmp:miuix-preference:0.9.4")
-    implementation(project(":profile-core"))
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.robolectric:robolectric:4.17")

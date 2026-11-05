@@ -29,4 +29,3 @@ dependencyResolutionManagement {
 
 rootProject.name = "TimerZ9Turbo"
 include(":app")
-include(":profile-core")
