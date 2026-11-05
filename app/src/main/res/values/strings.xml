@@ -33,7 +33,7 @@
     <string name="manager_label">Root manager</string>
     <string name="manager_select">Select Root Manager</string>
     <string name="manager_picker_empty">No apps found</string>
-    <string name="manager_no_ksud">Could not identify ksud</string>
+    <string name="manager_no_ksud">ksud will be checked when running</string>
     <string name="manager_show_all">Show all apps</string>
     <string name="manager_hide_all">Show compatible only</string>
     <string name="debug_export_log">Export debug log to file</string>
@@ -42,4 +42,7 @@
     <string name="debug_export_location_unsupported">Pick a folder on internal storage (e.g. Download)</string>
     <string name="diagnose">Diagnose</string>
     <string name="diagnose_summary">Trace ids + porting diag (no UAF, safe to run)</string>
+    <string name="manager_picker_no_detected">No libksud.so detected. Use Show all apps to select your manager.</string>
+    <string name="manager_picker_loading">Loading apps…</string>
+    <string name="manager_picker_error">Could not load apps. Reopen to retry.</string>
 </resources>

@@ -93,17 +93,18 @@ class ManagerScannerScanTest {
     }
 
     @Test
-    fun `scan detects a renamed daemon by its ELF content`() {
+    fun `picker scan checks only the legacy filename and defers renamed daemon inspection`() {
         val dir = install("com.sukisu.ultra", system = false, ksud = false)
-        writeRenamedDaemon(dir, "libfdbqiupsrx.so")
-        assertTrue(ManagerScanner.scan(pm, "com.timerz9turbo.app").single().hasKsud)
+        val daemon = writeRenamedDaemon(dir, "libfdbqiupsrx.so")
+        assertFalse(ManagerScanner.scan(pm, "com.timerz9turbo.app").single().hasKsud)
+        assertEquals(daemon, ManagerScanner.resolveKsud(pm, "com.sukisu.ultra")?.file)
     }
 
     @Test
-    fun `scan does not depend on the randomized name length`() {
+    fun `selected manager inspection does not depend on the randomized name length`() {
         val dir = install("com.sukisu.ultra", system = false, ksud = false)
-        writeRenamedDaemon(dir, "libfuture-daemon.so")
-        assertTrue(ManagerScanner.scan(pm, "com.timerz9turbo.app").single().hasKsud)
+        val daemon = writeRenamedDaemon(dir, "libfuture-daemon.so")
+        assertEquals(daemon, ManagerScanner.resolveKsud(pm, "com.sukisu.ultra")?.file)
     }
 
     @Test

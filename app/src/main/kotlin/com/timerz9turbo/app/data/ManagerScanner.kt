@@ -26,6 +26,7 @@ object ManagerScanner {
     )
 
     /**
+     * Fast filename-only scan; binary inspection is reserved for the selected manager.
      * All non-system apps, compatible first. Relies on QUERY_ALL_PACKAGES;
      * if that permission is ever dropped, filter to BUILTIN here.
      */
@@ -37,10 +38,11 @@ object ManagerScanner {
             .filter { (pi, _) -> pi.packageName != selfPackage }
             .filter { (_, ai) -> (ai.flags and ApplicationInfo.FLAG_SYSTEM) == 0 }
             .map { (pi, ai) ->
+                val dir = ai.nativeLibraryDir
                 Candidate(
                     packageName = pi.packageName,
                     label = ai.loadLabel(pm).toString(),
-                    hasKsud = KsudLibrary.find(ai.nativeLibraryDir) != null,
+                    hasKsud = dir != null && File(dir, "libksud.so").isFile,
                     builtin = pi.packageName in BUILTIN,
                 )
             }

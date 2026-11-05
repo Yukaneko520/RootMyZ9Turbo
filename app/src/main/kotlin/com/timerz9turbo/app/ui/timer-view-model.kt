@@ -98,11 +98,23 @@ class TimerViewModel(private val repository: TimerRepository) : ViewModel(), Tim
     }
 
     override fun onOpenManagerPicker() {
-        mutableState.update { it.copy(managerPickerVisible = true) }
+        if (state.value.managerLoading) {
+            mutableState.update { it.copy(managerPickerVisible = true) }
+            return
+        }
+        mutableState.update { it.copy(managerPickerVisible = true, managerLoading = true, managerLoadFailed = false) }
         viewModelScope.launch(Dispatchers.IO) {
-            runCatching { repository.installedManagers() }
-                .onSuccess { managers -> mutableState.update { it.copy(managerCandidates = managers) } }
-                .onFailure { appendLog("<k> error: cannot scan managers: ${it.message}") }
+            try {
+                val managers = repository.installedManagers()
+                mutableState.update { it.copy(managerCandidates = managers) }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                mutableState.update { it.copy(managerLoadFailed = true) }
+                appendLog("<k> error: cannot scan managers: ${error.message}")
+            } finally {
+                mutableState.update { it.copy(managerLoading = false) }
+            }
         }
     }
 

@@ -27,7 +27,7 @@
     <string name="log_title">Registro</string>
     <string name="manager_hide_all">Mostrar apenas compatível</string>
     <string name="manager_label">Gerenciador raiz</string>
-    <string name="manager_no_ksud">Não foi possível identificar o ksud</string>
+    <string name="manager_no_ksud">ksud será verificado ao executar</string>
     <string name="manager_picker_empty">Nenhum aplicativo encontrado</string>
     <string name="manager_show_all">Mostrar todos os aplicativos</string>
     <string name="manager_select">Selecione um gerenciador de root</string>
@@ -41,4 +41,7 @@
     <string name="soc_label">SoC</string>
     <string name="diagnose_summary">IDs de rastreamento e diagnóstico de portabilidade (sem UAF)</string>
     <string name="diagnose">Diagnóstico</string>
+    <string name="manager_picker_no_detected">libksud.so não detectado. Use Mostrar todos os aplicativos para selecionar o gerenciador.</string>
+    <string name="manager_picker_loading">Carregando aplicativos…</string>
+    <string name="manager_picker_error">Não foi possível carregar os aplicativos. Reabra para tentar novamente.</string>
 </resources>

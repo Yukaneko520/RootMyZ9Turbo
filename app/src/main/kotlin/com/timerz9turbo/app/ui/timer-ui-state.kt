@@ -1,6 +1,7 @@
 package com.timerz9turbo.app.ui
 
 import com.timerz9turbo.app.data.ManagerScanner
+import com.timerz9turbo.app.R
 import com.timerz9turbo.app.domain.model.LogEntry
 import com.timerz9turbo.app.domain.model.ShizukuStatus
 
@@ -23,7 +24,17 @@ data class TimerUiState(
     val managerCandidates: List<ManagerScanner.Candidate> = emptyList(),
     val selectedManagerPackage: String? = null,
     val managerPickerVisible: Boolean = false,
+    val managerLoading: Boolean = false,
+    val managerLoadFailed: Boolean = false,
 )
+
+internal fun TimerUiState.managerPickerMessage(showAll: Boolean): Int? = when {
+    managerLoading -> R.string.manager_picker_loading
+    managerLoadFailed -> R.string.manager_picker_error
+    managerCandidates.isEmpty() -> R.string.manager_picker_empty
+    !showAll && managerCandidates.none { it.hasKsud } -> R.string.manager_picker_no_detected
+    else -> null
+}
 
 interface TimerActions {
     fun onRun()

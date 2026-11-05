@@ -32,7 +32,7 @@
     <string name="manager_label">根管理器</string>
     <string name="manager_select">请选择 Root 管理器</string>
     <string name="manager_picker_empty">未找到应用</string>
-    <string name="manager_no_ksud">无法识别 ksud</string>
+    <string name="manager_no_ksud">运行时检查 ksud</string>
     <string name="manager_show_all">显示全部应用</string>
     <string name="manager_hide_all">仅显示兼容应用</string>
     <string name="debug_export_log">导出 Debug 日志到文件</string>
@@ -41,4 +41,7 @@
     <string name="debug_export_location_unsupported">请选择内部存储中的文件夹（例如 Download）</string>
     <string name="diagnose_summary">跟踪 ID 和移植诊断（不触发 UAF）</string>
     <string name="diagnose">诊断</string>
+    <string name="manager_picker_no_detected">未检测到 libksud.so。请点击显示全部应用并选择管理器。</string>
+    <string name="manager_picker_loading">正在加载应用…</string>
+    <string name="manager_picker_error">无法加载应用，请重新打开重试。</string>
 </resources>

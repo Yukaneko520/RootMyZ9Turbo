@@ -50,6 +50,8 @@ internal fun TimerManagerPickerSheet(
         onDismissRequest = actions::onCloseManagerPicker,
         content = {
             var showAll by remember { mutableStateOf(false) }
+            val visible = state.managerCandidates.filter { showAll || it.hasKsud }
+            val message = state.managerPickerMessage(showAll)
             LazyColumn(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -57,10 +59,17 @@ internal fun TimerManagerPickerSheet(
                     .navigationBarsPadding()
                     .selectableGroup(),
             ) {
-                if (state.managerCandidates.isEmpty()) {
+                item {
+                    TextButton(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                        text = stringResource(if (showAll) R.string.manager_hide_all else R.string.manager_show_all),
+                        onClick = { showAll = !showAll },
+                    )
+                }
+                if (message != null) {
                     item {
                         Text(
-                            text = stringResource(R.string.manager_picker_empty),
+                            text = stringResource(message),
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(vertical = 24.dp),
@@ -68,40 +77,15 @@ internal fun TimerManagerPickerSheet(
                             color = MiuixTheme.colorScheme.onBackgroundVariant,
                         )
                     }
-                } else {
-                    val compatible = state.managerCandidates.filter { it.hasKsud }
-                    val incompatible = state.managerCandidates.filterNot { it.hasKsud }
-                    val visibleIncompatible = if (showAll) incompatible else emptyList()
-                    items(compatible, key = { it.packageName }) { candidate ->
-                        ManagerPickerRow(
-                            title = candidate.label,
-                            subtitle = candidate.packageName,
-                            icon = candidate,
-                            selected = state.selectedManagerPackage == candidate.packageName,
-                        ) { actions.onManagerSelected(candidate.packageName) }
-                    }
-                    items(visibleIncompatible, key = { it.packageName }) { candidate ->
-                        ManagerPickerRow(
-                            title = candidate.label,
-                            subtitle = stringResource(R.string.manager_no_ksud),
-                            icon = candidate,
-                            selected = state.selectedManagerPackage == candidate.packageName,
-                            muted = true,
-                        ) { actions.onManagerSelected(candidate.packageName) }
-                    }
-                    if (incompatible.isNotEmpty()) {
-                        item {
-                            TextButton(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(top = 8.dp, bottom = 4.dp),
-                                text = stringResource(
-                                    if (showAll) R.string.manager_hide_all else R.string.manager_show_all,
-                                ),
-                                onClick = { showAll = !showAll },
-                            )
-                        }
-                    }
+                }
+                items(visible, key = { it.packageName }) { candidate ->
+                    ManagerPickerRow(
+                        title = candidate.label,
+                        subtitle = if (candidate.hasKsud) candidate.packageName else stringResource(R.string.manager_no_ksud),
+                        icon = candidate,
+                        selected = state.selectedManagerPackage == candidate.packageName,
+                        muted = !candidate.hasKsud,
+                    ) { actions.onManagerSelected(candidate.packageName) }
                 }
             }
         },
