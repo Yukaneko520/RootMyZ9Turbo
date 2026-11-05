@@ -871,6 +871,8 @@ static void write_ksu_script(void)
         "APK=$(pm path \"$PKG\" 2>/dev/null | head -1 | cut -d: -f2)\n"
         "echo \"[ksu] apk=$APK\"\n"
         "KSUD=''\n"
+        "if [ -f /data/local/tmp/ksud_path ]; then KSUD_PINNED=$(cat /data/local/tmp/ksud_path 2>/dev/null | head -1); [ -x \"$KSUD_PINNED\" ] && KSUD=\"$KSUD_PINNED\" && echo \"[ksu] ksud pinned: $KSUD\"; fi\n"
+        "[ -x \"$KSUD\" ] || KSUD=$(find /data/app -path \"*/${PKG}*/lib/arm64/libksud.so\" 2>/dev/null | head -1)\n"
         "if [ -n \"$APK\" ]; then "
         "KSUD=\"$(dirname \"$APK\")/lib/arm64/libksud.so\"; ls -l \"$KSUD\" 2>&1 | head -1; fi\n"
         "[ -x \"$KSUD\" ] || KSUD=$(find /data/app -path "
