@@ -93,15 +93,10 @@ class GhostlockUserService(private val context: Context) : IGhostlockUserService
                 if (chosen != null) callback.onLog("<s> SU manager selected: $chosen") else callback.onLog("<s> SU manager: auto-detect (${ManagerScanner.BUILTIN.joinToString()})")
                 ksudPath?.let { callback.onLog("<s> ksud resolved: ${it.absolutePath}") }
         
-                // Safemode (DFRoot logic): flag file read by ksu_stage.sh before late-load.
-                val safeFlag = File("/data/local/tmp/safemode_enable")
-                if (safeMode) {
-                    safeFlag.writeText("1\n")
-                    callback.onLog("[*] safemode ON: will disable /data/adb/modules/* on load")
-                } else {
-                    runCatching { if (safeFlag.exists()) safeFlag.delete() }
-                    callback.onLog("[*] safemode OFF")
-                }
+                // Safemode travels as a command param (GhostLock pattern: "fake safemode");
+                // the native rooted child disables modules itself before ksud late-load.
+                if (safeMode) callback.onLog("[*] safemode ON: will disable /data/adb/modules/* on load")
+                else callback.onLog("[*] safemode OFF")
 
                 val workDir = File("/data/local/tmp/timerZ9").apply {
                     require(isDirectory || mkdirs()) { "cannot create $absolutePath" }
@@ -109,10 +104,10 @@ class GhostlockUserService(private val context: Context) : IGhostlockUserService
                 val timerLog = File(workDir, "timer.log")
                 if (timerLog.exists()) runCatching { timerLog.delete() }
 
-                callback.onLog("<b> starting timer: ${timerBin.absolutePath} fake")
+                callback.onLog("<b> starting timer: ${timerBin.absolutePath} fake${if (safeMode) " safemode" else ""}")
                 // One-shot fake: full chain (vr de-tag + KSU late-load). Detached so the
                 // parked zombie (fake-cred page holder) survives; reboot is the only cleanup.
-                val cmd = "cd /data/local/tmp && setsid ${timerBin.absolutePath} fake >${timerLog.absolutePath} 2>&1 </dev/null &"
+                val cmd = "cd /data/local/tmp && setsid ${timerBin.absolutePath} fake" + (if (safeMode) " safemode" else "") + " >${timerLog.absolutePath} 2>&1 </dev/null &"
                 Runtime.getRuntime().exec(arrayOf("/system/bin/sh", "-c", cmd)).waitFor()
 
                 // Tail timer.log -> callback (GhostLock tones come from [+/-/*/!] markers).
