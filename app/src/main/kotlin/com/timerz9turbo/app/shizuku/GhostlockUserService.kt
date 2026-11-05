@@ -3,6 +3,7 @@ package com.timerz9turbo.app.shizuku
 import android.content.Context
 import android.os.Process
 import androidx.annotation.Keep
+import com.timerz9turbo.app.data.KsudLibrary
 import com.timerz9turbo.app.data.ManagerScanner
 import java.io.File
 import java.io.RandomAccessFile
@@ -74,24 +75,20 @@ class GhostlockUserService(private val context: Context) : IGhostlockUserService
                 // NO hardcoded SukiSU default: null/blank means auto-detect.
                 val pm = context.packageManager
                 val chosen = managerPackage?.takeIf { it.isNotBlank() }
-                val ksudPath = ManagerScanner.resolvePackages(chosen)
-                    .asSequence()
-                    .map { pkg ->
-                        runCatching {
-                            File(pm.getApplicationInfo(pkg, 0).nativeLibraryDir, "libksud.so")
-                        }.getOrNull()?.takeIf { it.isFile }
-                    }
-                    .firstOrNull { it != null }
-                // Persist choice for ksu_stage.sh (reads flag file, no hardcode).
-                File("/data/local/tmp/su_manager_pkg").writeText((chosen ?: "") + "\n")
-                // Exact ksud path (PackageManager-resolved): pm(1) has no binder access in kernel context.
-                runCatching {
-                    val ksudFlag = File("/data/local/tmp/ksud_path")
-                    if (ksudPath != null) ksudFlag.writeText(ksudPath.absolutePath + "\n")
-                    else if (ksudFlag.exists()) ksudFlag.delete()
+                val resolved = requireNotNull(ManagerScanner.resolveKsud(pm, chosen)) {
+                    "No unambiguous ksud daemon found in the installed SU managers"
                 }
-                if (chosen != null) callback.onLog("<s> SU manager selected: $chosen") else callback.onLog("<s> SU manager: auto-detect (${ManagerScanner.BUILTIN.joinToString()})")
-                ksudPath?.let { callback.onLog("<s> ksud resolved: ${it.absolutePath}") }
+                val ksudPath = if (resolved.file.name == "libksud.so") resolved.file else {
+                    KsudLibrary.stage(resolved.file, File("/data/local/tmp/ksud")).also {
+                        callback.onLog("<s> ksud copied: ${resolved.file.absolutePath} -> ${it.absolutePath}")
+                    }
+                }
+                require(ksudPath.canExecute()) { "ksud is not executable: ${ksudPath.absolutePath}" }
+                // Both flags must be ready before Timer runs, even if pm(1) is unavailable later.
+                File("/data/local/tmp/su_manager_pkg").writeText(resolved.packageName + "\n")
+                File("/data/local/tmp/ksud_path").writeText(ksudPath.absolutePath + "\n")
+                callback.onLog("<s> SU manager resolved: ${resolved.packageName}")
+                callback.onLog("<s> ksud resolved: ${ksudPath.absolutePath}")
         
                 // Safemode travels as a command param (GhostLock pattern: "fake safemode");
                 // the native rooted child disables modules itself before ksud late-load.

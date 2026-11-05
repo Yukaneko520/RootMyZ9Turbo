@@ -22,7 +22,7 @@ class ManagerScannerTest {
     @Test
     fun `resolvePackages puts chosen builtin first`() {
         assertEquals(
-            listOf("me.weishu.kernelsu", "me.weishu.kernelsu.pr", "com.resukisu.resukisu", "org.bakasu.bakasu", "com.kowx712.supermanager"),
+            listOf("me.weishu.kernelsu", "me.weishu.kernelsu.pr", "com.resukisu.resukisu", "org.bakasu.bakasu", "com.kowx712.supermanager", "com.sukisu.ultra"),
             ManagerScanner.resolvePackages("me.weishu.kernelsu"),
         )
     }

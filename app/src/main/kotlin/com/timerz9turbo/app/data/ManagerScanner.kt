@@ -15,6 +15,7 @@ object ManagerScanner {
         "com.resukisu.resukisu",
         "org.bakasu.bakasu",
         "com.kowx712.supermanager",
+        "com.sukisu.ultra",
     )
 
     data class Candidate(
@@ -36,11 +37,10 @@ object ManagerScanner {
             .filter { (pi, _) -> pi.packageName != selfPackage }
             .filter { (_, ai) -> (ai.flags and ApplicationInfo.FLAG_SYSTEM) == 0 }
             .map { (pi, ai) ->
-                val dir = ai.nativeLibraryDir
                 Candidate(
                     packageName = pi.packageName,
                     label = ai.loadLabel(pm).toString(),
-                    hasKsud = dir != null && File(dir, "libksud.so").isFile,
+                    hasKsud = KsudLibrary.find(ai.nativeLibraryDir) != null,
                     builtin = pi.packageName in BUILTIN,
                 )
             }
@@ -56,4 +56,15 @@ object ManagerScanner {
     fun resolvePackages(chosen: String?): List<String> =
         if (chosen.isNullOrBlank()) BUILTIN
         else listOf(chosen) + BUILTIN.filter { it != chosen }
+
+    data class ResolvedKsud(val packageName: String, val file: File)
+
+    /** Keep the actual package together with its daemon, including on fallback. */
+    fun resolveKsud(pm: PackageManager, chosen: String?): ResolvedKsud? =
+        resolvePackages(chosen).firstNotNullOfOrNull { packageName ->
+            runCatching {
+                KsudLibrary.find(pm.getApplicationInfo(packageName, 0).nativeLibraryDir)
+                    ?.let { ResolvedKsud(packageName, it) }
+            }.getOrNull()
+        }
 }

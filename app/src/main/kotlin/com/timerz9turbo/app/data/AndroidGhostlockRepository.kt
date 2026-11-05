@@ -1061,14 +1061,9 @@ class AndroidGhostlockRepository(context: Context) : GhostlockRepository {
 
     /** First ksud binary in resolvePackages order, or null. */
     private fun resolveKsudPath(onLog: (String) -> Unit): File? {
-        val packages = ManagerScanner.resolvePackages(selectedManagerPackage())
-        for (packageName in packages) {
-            val source = runCatching {
-                File(appContext.packageManager.getApplicationInfo(packageName, 0).nativeLibraryDir, "libksud.so")
-            }.getOrNull()?.takeIf { it.isFile } ?: continue
-            return source
-        }
-        onLog("<k> no manager app with libksud.so found")
+        ManagerScanner.resolveKsud(appContext.packageManager, selectedManagerPackage())
+            ?.let { return it.file }
+        onLog("<k> no manager app with an unambiguous ksud daemon found")
         return null
     }
 
