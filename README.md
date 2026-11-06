@@ -28,14 +28,20 @@ JDK 25 toolchain. APKs are under `build/app/outputs/apk/release/`.
   the selected manager.
 - `KsudLibrary` prefers `libksud.so`; otherwise it requires one matching
   ARM64 ELF payload before copying it to `/data/local/tmp/ksud`.
+- The temporary ksud is removed after each run, including failures/timeouts.
+  The native script waits for the payload's `late-load` processes to finish
+  before reporting the loaded result, since SukiSU late-load daemonizes.
+  Long-lived subcommands such as `sulogd` do not block completion or cleanup.
+- The credential holder's normal parking message does not end log monitoring;
+  the detached ksud worker may still be finishing at that point.
 - Executables are installed by temporary-file rename. Manager/debug preferences
   retain their existing storage key; existing saved user documents are untouched.
 - Build 6 uses Timer-only AIDL and a new service component, replacing ignored
   CPU/profile/force-attack arguments and the obsolete status callback.
 
-Native source is maintained separately at `../timer-native`; this cleanup does
-not modify either executable or kernel offsets. Content detection and host
-tests do not validate an on-device exploit run.
+Native source is maintained separately at `../timer-native`. The packaged
+binaries include the ksud completion wait; kernel offsets are unchanged.
+Content detection and host tests do not validate an on-device exploit run.
 
 The UI derives from GhostLock; upstream attribution and license links remain
 in About. See [changelog](docs/project-changelog.md).

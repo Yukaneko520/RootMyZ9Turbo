@@ -14,42 +14,44 @@ class TimerUserService(private val context: Context) : ITimerUserService.Stub() 
 
     override fun runTimer(safeMode: Boolean, debugDir: String?, managerPackage: String?, callback: ITimerCallback) =
         execute(callback) {
-            val timer = installTimer()
-            val resolved = requireNotNull(ManagerScanner.resolveKsud(context.packageManager, managerPackage)) {
-                "No unambiguous ksud daemon found in the selected root manager"
-            }
-            val daemon = KsudLibrary.stage(resolved.file, File("/data/local/tmp/ksud")).also {
-                callback.onLog("<s> ksud copied: ${resolved.file.absolutePath} -> ${it.absolutePath}")
-            }
-            require(daemon.canExecute()) { "ksud is not executable: ${daemon.absolutePath}" }
-            File("/data/local/tmp/su_manager_pkg").writeText(resolved.packageName + "\n")
-            File("/data/local/tmp/ksud_path").writeText(daemon.absolutePath + "\n")
-            callback.onLog("<s> SU manager resolved: ${resolved.packageName}")
-            callback.onLog("<s> ksud resolved: ${daemon.absolutePath}")
-            callback.onLog("[*] safemode ${if (safeMode) "ON" else "OFF"}")
-            val workDir = File("/data/local/tmp/timerZ9").apply {
-                require(isDirectory || mkdirs()) { "cannot create $absolutePath" }
-            }
-            val logFile = File(workDir, "timer.log")
-            require(!logFile.exists() || logFile.delete()) { "cannot clear previous Timer log" }
-            callback.onLog("<b> starting timer: ${timer.absolutePath} fake${if (safeMode) " safemode" else ""}")
-            // Detach so the parked native process continues holding its credential page.
-            val command = "cd /data/local/tmp && setsid ${timer.absolutePath} fake" +
-                (if (safeMode) " safemode" else "") + " >${logFile.absolutePath} 2>&1 </dev/null &"
-            require(Runtime.getRuntime().exec(arrayOf("/system/bin/sh", "-c", command)).waitFor() == 0) {
-                "cannot launch Timer"
-            }
-            val loaded = try {
-                awaitTimerLoaded(logFile) { line -> runCatching { callback.onLog(line) } }
-            } finally {
-                if (!debugDir.isNullOrBlank() && logFile.isFile) runCatching {
-                    File(debugDir).mkdirs()
-                    logFile.copyTo(File(debugDir, "timer-${System.currentTimeMillis()}.log"), overwrite = true)
+            withTemporaryKsud(File("/data/local/tmp/ksud"), callback::onLog) { daemon ->
+                val timer = installTimer()
+                val resolved = requireNotNull(ManagerScanner.resolveKsud(context.packageManager, managerPackage)) {
+                    "No unambiguous ksud daemon found in the selected root manager"
                 }
+                KsudLibrary.stage(resolved.file, daemon).also {
+                    callback.onLog("<s> ksud copied: ${resolved.file.absolutePath} -> ${it.absolutePath}")
+                }
+                require(daemon.canExecute()) { "ksud is not executable: ${daemon.absolutePath}" }
+                File("/data/local/tmp/su_manager_pkg").writeText(resolved.packageName + "\n")
+                File("/data/local/tmp/ksud_path").writeText(daemon.absolutePath + "\n")
+                callback.onLog("<s> SU manager resolved: ${resolved.packageName}")
+                callback.onLog("<s> ksud resolved: ${daemon.absolutePath}")
+                callback.onLog("[*] safemode ${if (safeMode) "ON" else "OFF"}")
+                val workDir = File("/data/local/tmp/timerZ9").apply {
+                    require(isDirectory || mkdirs()) { "cannot create $absolutePath" }
+                }
+                val logFile = File(workDir, "timer.log")
+                require(!logFile.exists() || logFile.delete()) { "cannot clear previous Timer log" }
+                callback.onLog("<b> starting timer: ${timer.absolutePath} fake${if (safeMode) " safemode" else ""}")
+                // Detach so the parked native process continues holding its credential page.
+                val command = "cd /data/local/tmp && setsid ${timer.absolutePath} fake" +
+                    (if (safeMode) " safemode" else "") + " >${logFile.absolutePath} 2>&1 </dev/null &"
+                require(Runtime.getRuntime().exec(arrayOf("/system/bin/sh", "-c", command)).waitFor() == 0) {
+                    "cannot launch Timer"
+                }
+                val loaded = try {
+                    awaitTimerLoaded(logFile) { line -> runCatching { callback.onLog(line) } }
+                } finally {
+                    if (!debugDir.isNullOrBlank() && logFile.isFile) runCatching {
+                        File(debugDir).mkdirs()
+                        logFile.copyTo(File(debugDir, "timer-${System.currentTimeMillis()}.log"), overwrite = true)
+                    }
+                }
+                require(loaded) { "SukiSU/KernelSU failed (KSU_LOADED not seen; reboot then retry)" }
+                callback.onLog("[+] KSU_LOADED - parked zombie holds fake-cred page; reboot to clean")
+                0
             }
-            require(loaded) { "SukiSU/KernelSU failed (KSU_LOADED not seen; reboot then retry)" }
-            callback.onLog("[+] KSU_LOADED - parked zombie holds fake-cred page; reboot to clean")
-            0
         }
 
     override fun runDiagnose(callback: ITimerCallback) = execute(callback) {
@@ -106,3 +108,12 @@ class TimerUserService(private val context: Context) : ITimerUserService.Stub() 
 }
 
 internal fun timerAssetFor(release: String): String = if ("6.1.124" in release) "timer-6.1.124" else "timer"
+
+internal fun withTemporaryKsud(file: File, onLog: (String) -> Unit, operation: (File) -> Int): Int = try {
+    operation(file)
+} finally {
+    if (file.exists()) {
+        val removed = file.delete()
+        runCatching { onLog(if (removed) "[ksu] temporary ksud removed" else "[!] cannot remove temporary ksud") }
+    }
+}

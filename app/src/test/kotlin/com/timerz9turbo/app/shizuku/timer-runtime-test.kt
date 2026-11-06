@@ -37,4 +37,51 @@ class TimerRuntimeTest {
         val log = temporary.newFile().apply { writeText("KSU_MISSING\n") }
         assertFalse(awaitTimerLoaded(log) {})
     }
+
+    @Test(timeout = 3000)
+    fun `credential holder parking does not stop monitoring the detached ksud worker`() {
+        val log = temporary.newFile().apply {
+            writeText(
+                "[ksu] waiting for late-load to finish\n" +
+                    "[+] child exit status=0\n" +
+                    "[!] fake cred page held; reboot to clean -- parking without reap (zombie held)\n" +
+                    "[ksu] late-load finished\nKSU_LOADED\n"
+            )
+        }
+        val lines = mutableListOf<String>()
+        assertTrue(awaitTimerLoaded(log, lines::add))
+        assertEquals("KSU_LOADED", lines.last())
+    }
+
+    @Test(timeout = 3000)
+    fun `parking after a failed native stage remains a terminal failure`() {
+        val log = temporary.newFile().apply {
+            writeText("[!] fake cred write failed -- parking without reap (zombie held)\n")
+        }
+        assertFalse(awaitTimerLoaded(log) {})
+    }
+
+    @Test
+    fun `temporary ksud stays available until the operation completes then is removed`() {
+        val daemon = temporary.newFile().apply { writeText("staged payload") }
+        val result = withTemporaryKsud(daemon, {}) {
+            assertEquals("staged payload", it.readText())
+            0
+        }
+        assertEquals(0, result)
+        assertFalse(daemon.exists())
+    }
+
+    @Test
+    fun `temporary ksud is removed without hiding the original failure`() {
+        val daemon = temporary.newFile()
+        val failure = IllegalStateException("late-load failed")
+        try {
+            withTemporaryKsud(daemon, { error("callback disconnected") }) { throw failure }
+            throw AssertionError("Failure was swallowed")
+        } catch (caught: IllegalStateException) {
+            org.junit.Assert.assertSame(failure, caught)
+        }
+        assertFalse(daemon.exists())
+    }
 }

@@ -15,7 +15,10 @@ internal fun awaitTimerLoaded(file: File, onLog: (String) -> Unit): Boolean {
                 if (line.isBlank()) continue
                 onLog(line)
                 if (line.contains("KSU_LOADED")) return true
-                if (listOf("KSU_MISSING", "ksud missing", "did not reach euid", "cred write did not land", "parking without reap")
+                // The credential holder can park while the detached ksud worker is still finishing.
+                if (line.contains("parking without reap") && !line.contains("fake cred page held; reboot to clean"))
+                    return false
+                if (listOf("KSU_MISSING", "ksud missing", "did not reach euid", "cred write did not land")
                     .any(line::contains)) return false
             }
             offset = log.filePointer
