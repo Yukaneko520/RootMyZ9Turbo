@@ -6,6 +6,7 @@ import androidx.annotation.Keep
 import com.timerz9turbo.app.data.KsudLibrary
 import com.timerz9turbo.app.data.ManagerScanner
 import java.io.File
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 @Keep
@@ -37,19 +38,24 @@ class TimerUserService(private val context: Context) : ITimerUserService.Stub() 
                 // Detach so the parked native process continues holding its credential page.
                 val command = "cd /data/local/tmp && setsid ${timer.absolutePath} fake" +
                     (if (safeMode) " safemode" else "") + " >${logFile.absolutePath} 2>&1 </dev/null &"
-                require(Runtime.getRuntime().exec(arrayOf("/system/bin/sh", "-c", command)).waitFor() == 0) {
-                    "cannot launch Timer"
-                }
+                val completion = File(workDir, "complete-${System.nanoTime()}.bin")
+                check(completion.createNewFile()) { "cannot create Timer completion file" }
                 val loaded = try {
-                    awaitTimerLoaded(logFile) { line -> runCatching { callback.onLog(line) } }
+                    val launcher = ProcessBuilder("/system/bin/sh", "-c", command)
+                    launcher.environment()["TIMERZ9_COMPLETION_PATH"] = completion.absolutePath
+                    require(launcher.start().waitFor() == 0) { "cannot launch Timer" }
+                    awaitTimerLoaded(logFile, completion, confirmKernel = { confirmKernelLoaded(daemon, callback) }) { line ->
+                        runCatching { callback.onLog(line) }
+                    }
                 } finally {
+                    completion.delete()
                     if (!debugDir.isNullOrBlank() && logFile.isFile) runCatching {
                         File(debugDir).mkdirs()
                         logFile.copyTo(File(debugDir, "timer-${System.currentTimeMillis()}.log"), overwrite = true)
                     }
                 }
-                require(loaded) { "KernelSU late-load failed (KSU_LOADED not seen; reboot then retry)" }
-                callback.onLog("[+] KSU_LOADED - parked zombie holds fake-cred page; reboot to clean")
+                require(loaded) { "KernelSU not confirmed by kernel API after Timer completion (reboot then retry)" }
+                callback.onLog("[+] KernelSU confirmed; native credential holder remains parked")
                 0
             }
         }
@@ -73,6 +79,26 @@ class TimerUserService(private val context: Context) : ITimerUserService.Stub() 
             } else text.lines().takeLast(20).forEach { callback.onLog("[k] $it") }
         }
         code
+    }
+
+    private fun confirmKernelLoaded(daemon: File, callback: ITimerCallback): Boolean = runCatching {
+        val probe = ProcessBuilder(daemon.absolutePath, "debug", "version").redirectErrorStream(true).start()
+        try {
+            if (!probe.waitFor(3, TimeUnit.SECONDS)) {
+                probe.destroyForcibly()
+                error("kernel probe timed out")
+            }
+            val output = probe.inputStream.bufferedReader().use { it.readText() }
+            val version = kernelVersionFromOutput(output)
+            check(probe.exitValue() == 0 && version != null) { "kernel probe not confirmed: ${output.trim().take(200)}" }
+            runCatching { callback.onLog("[ksu] kernel confirmed: version=$version") }
+            true
+        } finally {
+            probe.destroy()
+        }
+    }.getOrElse {
+        runCatching { callback.onLog("[!] kernel verification: ${it.message}") }
+        false
     }
 
     private fun installTimer(): File {

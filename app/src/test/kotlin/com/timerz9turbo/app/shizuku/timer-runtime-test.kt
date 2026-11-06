@@ -1,7 +1,10 @@
 package com.timerz9turbo.app.shizuku
 
+import java.io.File
+import kotlin.concurrent.thread
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -10,6 +13,8 @@ import org.junit.rules.TemporaryFolder
 class TimerRuntimeTest {
     @get:Rule val temporary = TemporaryFolder()
 
+    private fun completed() = temporary.newFile().apply { writeBytes(byteArrayOf(1)) }
+
     @Test
     fun `selects the backend matching the existing kernel mapping`() {
         assertEquals("timer-6.1.124", timerAssetFor("6.1.124-android14-11-maybe-dirty"))
@@ -17,54 +22,59 @@ class TimerRuntimeTest {
     }
 
     @Test(timeout = 3000)
-    fun `success is accepted only after the native loaded marker`() {
+    fun `success log cannot bypass kernel confirmation`() {
         val log = temporary.newFile().apply { writeText("[*] starting\r\n\nKSU_LOADED\r\n") }
         val lines = mutableListOf<String>()
-        assertTrue(awaitTimerLoaded(log, lines::add))
+        assertFalse(awaitTimerLoaded(log, completed(), confirmKernel = { false }, onLog = lines::add))
         assertEquals(listOf("[*] starting", "KSU_LOADED"), lines)
     }
 
     @Test(timeout = 3000)
-    fun `a terminal failure is not hidden by later diagnostics`() {
-        val log = temporary.newFile().apply { writeText("[ksu] ksud missing\nextra diagnostics\n") }
-        val lines = mutableListOf<String>()
-        assertFalse(awaitTimerLoaded(log, lines::add))
-        assertEquals(listOf("[ksu] ksud missing"), lines)
+    fun `native completion and kernel confirmation work without any logs`() {
+        assertTrue(awaitTimerLoaded(temporary.newFile(), completed(), confirmKernel = { true }) {})
     }
 
     @Test(timeout = 3000)
-    fun `missing module ends monitoring immediately`() {
-        val log = temporary.newFile().apply { writeText("KSU_MISSING\n") }
-        assertFalse(awaitTimerLoaded(log) {})
-    }
-
-    @Test(timeout = 3000)
-    fun `missing selected manager ends monitoring immediately`() {
-        val log = temporary.newFile().apply { writeText("[ksu] manager package missing\n") }
-        assertFalse(awaitTimerLoaded(log) {})
-    }
-
-    @Test(timeout = 3000)
-    fun `credential holder parking does not stop monitoring the detached ksud worker`() {
-        val log = temporary.newFile().apply {
-            writeText(
-                "[ksu] waiting for late-load to finish\n" +
-                    "[+] child exit status=0\n" +
-                    "[!] fake cred page held; reboot to clean -- parking without reap (zombie held)\n" +
-                    "[ksu] late-load finished\nKSU_LOADED\n"
-            )
+    fun `human log wording cannot override the actual kernel state`() {
+        for (message in listOf("KSU_MISSING", "manager package missing", "parking without reap", "new wording")) {
+            val log = temporary.newFile().apply { writeText(message + "\n") }
+            assertTrue(awaitTimerLoaded(log, completed(), confirmKernel = { true }) {})
         }
-        val lines = mutableListOf<String>()
-        assertTrue(awaitTimerLoaded(log, lines::add))
-        assertEquals("KSU_LOADED", lines.last())
     }
 
     @Test(timeout = 3000)
-    fun `parking after a failed native stage remains a terminal failure`() {
-        val log = temporary.newFile().apply {
-            writeText("[!] fake cred write failed -- parking without reap (zombie held)\n")
+    fun `invalid completion events never trigger kernel confirmation`() {
+        for (event in listOf(byteArrayOf(0), byteArrayOf(1, 1), "1".toByteArray())) {
+            val completion = temporary.newFile().apply { writeBytes(event) }
+            var probes = 0
+            assertFalse(awaitTimerLoaded(temporary.newFile(), completion, confirmKernel = { probes++; true }) {})
+            assertEquals(0, probes)
         }
-        assertFalse(awaitTimerLoaded(log) {})
+    }
+
+    @Test(timeout = 3000)
+    fun `an empty completion file stays pending until native writes the event`() {
+        val completion = temporary.newFile()
+        var probes = 0
+        val writer = thread(isDaemon = true) {
+            Thread.sleep(100)
+            completion.writeBytes(byteArrayOf(1))
+        }
+        try {
+            assertTrue(awaitTimerLoaded(temporary.newFile(), completion, confirmKernel = { probes++; true }) {})
+            assertEquals(1, probes)
+        } finally {
+            writer.join()
+        }
+    }
+
+    @Test
+    fun `only a positive kernel version confirms the loaded driver`() {
+        assertEquals(41150, kernelVersionFromOutput("Kernel Version: 41150\r\n"))
+        assertNull(kernelVersionFromOutput("Kernel Version: 0\n"))
+        assertNull(kernelVersionFromOutput("ksud 4.3.0-r2 (uapi: 6)\n"))
+        assertNull(kernelVersionFromOutput("Kernel Version: -1\n"))
+        assertNull(kernelVersionFromOutput("Kernel Version: 9999999999999\n"))
     }
 
     @Test

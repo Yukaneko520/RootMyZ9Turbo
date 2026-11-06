@@ -17,7 +17,7 @@ layout.buildDirectory.set(rootProject.layout.buildDirectory.dir("app"))
 val appName = "TimerZ9Turbo"
 val appVersionName = "1.0"
 
-val appVersionCode = 17
+val appVersionCode = 19
 
 val buildInfoSrc = layout.buildDirectory.dir("generated/source/buildInfo")
 

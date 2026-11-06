@@ -34,12 +34,15 @@ JDK 25 toolchain. APKs are under `build/app/outputs/apk/release/`.
   The native script waits for the payload's `late-load` processes to finish
   before reporting the loaded result, because late-load may daemonize.
   Long-lived subcommands such as `sulogd` do not block completion or cleanup.
-- The credential holder's normal parking message does not end log monitoring;
-  the detached ksud worker may still be finishing at that point.
+- Native completion uses a unique per-run file passed by `TIMERZ9_COMPLETION_PATH`.
+  The holder writes one binary byte (1) at completion; the app then requires a
+  positive kernel version from the selected ksud's read-only `debug version`
+  query. Log messages never decide success or failure. Completion files are
+  removed after monitoring; late native exits cannot recreate them.
 - Native helpers carry a `tzh-<owner PID>` name. When the run parks or finishes,
-  it sends SIGSTOP only to its own helpers, retaining their mappings while
-  preventing leftover helper loops from using CPU. The credential holder stays
-  alive. Existing helpers from older binaries are not changed by this update.
+  it sends SIGKILL only to its own helpers. The credential holder stays alive;
+  held zombies are not reaped. Existing helpers from older binaries are not
+  changed by this update. This termination path still needs on-device testing.
 - Executables are installed by temporary-file rename. Manager/debug preferences
   retain their existing storage key; existing saved user documents are untouched.
 - Build 6 uses Timer-only AIDL and a new service component, replacing ignored
