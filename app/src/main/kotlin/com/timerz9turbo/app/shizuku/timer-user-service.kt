@@ -48,7 +48,7 @@ class TimerUserService(private val context: Context) : ITimerUserService.Stub() 
                         logFile.copyTo(File(debugDir, "timer-${System.currentTimeMillis()}.log"), overwrite = true)
                     }
                 }
-                require(loaded) { "SukiSU/KernelSU failed (KSU_LOADED not seen; reboot then retry)" }
+                require(loaded) { "KernelSU late-load failed (KSU_LOADED not seen; reboot then retry)" }
                 callback.onLog("[+] KSU_LOADED - parked zombie holds fake-cred page; reboot to clean")
                 0
             }

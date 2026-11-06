@@ -23,6 +23,8 @@ JDK 25 toolchain. APKs are under `build/app/outputs/apk/release/`.
 - `TimerUserService` stages the selected Timer asset and resolves ksud.
 - A root manager must be selected explicitly; an unavailable selection is not
   replaced automatically by a different installed manager.
+  The native script also requires the app-written `su_manager_pkg` and
+  `ksud_path`; it has no default package or daemon-discovery fallback.
 - The picker only checks for `libksud.so` by filename. Use Show all apps for a
   manager with a renamed payload; binary inspection happens only when running
   the selected manager.
@@ -30,10 +32,14 @@ JDK 25 toolchain. APKs are under `build/app/outputs/apk/release/`.
   ARM64 ELF payload before copying it to `/data/local/tmp/ksud`.
 - The temporary ksud is removed after each run, including failures/timeouts.
   The native script waits for the payload's `late-load` processes to finish
-  before reporting the loaded result, since SukiSU late-load daemonizes.
+  before reporting the loaded result, because late-load may daemonize.
   Long-lived subcommands such as `sulogd` do not block completion or cleanup.
 - The credential holder's normal parking message does not end log monitoring;
   the detached ksud worker may still be finishing at that point.
+- Native helpers carry a `tzh-<owner PID>` name. When the run parks or finishes,
+  it sends SIGSTOP only to its own helpers, retaining their mappings while
+  preventing leftover helper loops from using CPU. The credential holder stays
+  alive. Existing helpers from older binaries are not changed by this update.
 - Executables are installed by temporary-file rename. Manager/debug preferences
   retain their existing storage key; existing saved user documents are untouched.
 - Build 6 uses Timer-only AIDL and a new service component, replacing ignored

@@ -39,6 +39,12 @@ class TimerRuntimeTest {
     }
 
     @Test(timeout = 3000)
+    fun `missing selected manager ends monitoring immediately`() {
+        val log = temporary.newFile().apply { writeText("[ksu] manager package missing\n") }
+        assertFalse(awaitTimerLoaded(log) {})
+    }
+
+    @Test(timeout = 3000)
     fun `credential holder parking does not stop monitoring the detached ksud worker`() {
         val log = temporary.newFile().apply {
             writeText(
