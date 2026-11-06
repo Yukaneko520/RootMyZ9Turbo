@@ -1,6 +1,8 @@
 package com.timerz9turbo.app.data
 
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import androidx.core.content.edit
 import com.timerz9turbo.app.BuildConfig
 import com.timerz9turbo.app.BuildInfo
@@ -32,7 +34,16 @@ class TimerRepository(context: Context) {
     )
 
     fun setDebugExportEnabled(enabled: Boolean) { preferences.edit { putBoolean("debug_export_enabled", enabled) } }
-    fun setDebugExportLocation(location: String) { preferences.edit { putString("debug_export_location", normalizeDebugLocation(location)) } }
+    fun setDebugExportLocation(location: String, treeUri: String? = null) {
+        treeUri?.let {
+            context.contentResolver.takePersistableUriPermission(Uri.parse(it),
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+        }
+        preferences.edit {
+            putString("debug_export_location", normalizeDebugLocation(location))
+            putString("debug_export_tree_uri", treeUri)
+        }
+    }
     fun requestShizukuPermission() = runner.requestPermission()
     fun setShizukuStatusListener(listener: (() -> Unit)?) = runner.setStatusListener(listener)
     fun close() = runner.close()
@@ -40,9 +51,10 @@ class TimerRepository(context: Context) {
     suspend fun run(diagnose: Boolean, onLog: (String) -> Unit): Int {
         val settings = debugSettings()
         val archive = if (settings.exportEnabled) runCatching {
-            DebugAttackLog.open(context, if (diagnose) "diagnose" else "timer", settings.exportLocation)
+            DebugAttackLog.open(context, if (diagnose) "diagnose" else "timer", settings.exportLocation,
+                preferences.getString("debug_export_tree_uri", null)?.let(Uri::parse))
         }.getOrNull() else null
-        if (settings.exportEnabled && archive == null) onLog("<k> warning: cannot create debug log")
+        if (settings.exportEnabled && archive == null) onLog("<k> warning: cannot create debug log; choose Save location again")
         val log: (String) -> Unit = { line ->
             runCatching { archive?.append(line) }
             onLog(line)

@@ -1,9 +1,11 @@
 package com.timerz9turbo.app.data
 
 import android.content.Context
+import android.net.Uri
 import com.timerz9turbo.app.domain.model.DebugSettings
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -15,6 +17,26 @@ import org.robolectric.shadows.ShadowBuild
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
 class TimerRepositoryTest {
+    @Test
+    fun `selected log folder retains its URI and access permission`() {
+        val context = RuntimeEnvironment.getApplication()
+        val tree = Uri.parse("content://com.android.externalstorage.documents/tree/primary%3AZ9tb")
+        val first = TimerRepository(context)
+        try {
+            first.setDebugExportLocation("Z9tb", tree.toString())
+        } finally { first.close() }
+        val second = TimerRepository(context)
+        try {
+            assertEquals("Z9tb", second.debugSettings().exportLocation)
+            val prefs = context.getSharedPreferences("ghostlock_prefs", Context.MODE_PRIVATE)
+            assertEquals(tree.toString(), prefs.getString("debug_export_tree_uri", null))
+            val permission = context.contentResolver.persistedUriPermissions.single { it.uri == tree }
+            assertTrue(permission.isReadPermission && permission.isWritePermission)
+            second.setDebugExportLocation("Download/Timer")
+            assertNull(prefs.getString("debug_export_tree_uri", null))
+        } finally { second.close() }
+    }
+
     @Test
     fun `manager and export preferences survive repository recreation`() {
         val context = RuntimeEnvironment.getApplication()

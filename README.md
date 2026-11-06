@@ -45,10 +45,13 @@ JDK 25 toolchain. APKs are under `build/app/outputs/apk/release/`.
   changed by this update. This termination path still needs on-device testing.
 - Executables are installed by temporary-file rename. Manager/debug preferences
   retain their existing storage key; existing saved user documents are untouched.
+- Picked log folders use their persisted document-tree URI, including primary
+  storage folders outside Download. The default destination still uses MediaStore.
+  Re-select a folder saved by older builds once to retain its URI permission.
 - Build 6 uses Timer-only AIDL and a new service component, replacing ignored
   CPU/profile/force-attack arguments and the obsolete status callback.
 
-Native source is maintained separately at `../timer-native`. The packaged
+Native source is maintained separately at branch `timer-native`. The packaged
 binaries include the ksud completion wait; kernel offsets are unchanged.
 Content detection and host tests do not validate an on-device exploit run.
 

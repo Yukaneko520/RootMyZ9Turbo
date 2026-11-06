@@ -132,9 +132,12 @@ class TimerViewModel(private val repository: TimerRepository) : ViewModel(), Tim
         mutableState.update { it.copy(debugExportEnabled = enabled) }
     }
     override fun onDebugExportLocationPick() = send(TimerEffect.PickDebugFolder)
-    fun onDebugExportLocationPicked(location: String?) {
+    fun onDebugExportLocationPicked(location: String?, treeUri: String? = null) {
         if (location == null) { send(TimerEffect.Toast(R.string.debug_export_location_unsupported)); return }
-        repository.setDebugExportLocation(location)
+        if (runCatching { repository.setDebugExportLocation(location, treeUri) }.isFailure) {
+            send(TimerEffect.Toast(R.string.debug_export_location_unsupported))
+            return
+        }
         mutableState.update { it.copy(debugExportLocation = repository.debugSettings().exportLocation) }
     }
 

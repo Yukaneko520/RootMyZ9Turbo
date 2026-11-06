@@ -25,7 +25,7 @@ class MainActivity : ComponentActivity() {
         viewModelFactory { initializer { TimerViewModel((application as TimerZ9Application).createRepository()) } }
     }
     private val folderPicker = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-        if (uri != null) viewModel.onDebugExportLocationPicked(documentTreeRelativePath(uri))
+        if (uri != null) viewModel.onDebugExportLocationPicked(documentTreeRelativePath(uri), uri.toString())
     }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)

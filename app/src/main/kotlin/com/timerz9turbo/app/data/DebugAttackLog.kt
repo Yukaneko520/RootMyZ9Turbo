@@ -3,8 +3,10 @@ package com.timerz9turbo.app.data
 import android.content.ContentValues
 import android.content.Context
 import android.media.MediaScannerConnection
+import android.net.Uri
 import android.os.Environment
 import android.provider.MediaStore
+import android.provider.DocumentsContract
 import java.io.BufferedWriter
 import java.io.Closeable
 import java.io.File
@@ -19,7 +21,7 @@ import java.util.concurrent.atomic.AtomicLong
 internal class DebugAttackLog private constructor(
     private val context: Context,
     val displayName: String,
-    /** Downloads-relative folder that holds the attempt log and its dumps. */
+    /** Primary-storage-relative folder that holds the attempt log and its dumps. */
     val folderPath: String,
     private val writer: BufferedWriter,
 ) : Closeable {
@@ -53,10 +55,10 @@ internal class DebugAttackLog private constructor(
     companion object {
         private val sequence = AtomicLong()
 
-        fun open(context: Context, entry: String, folder: String): DebugAttackLog? {
+        fun open(context: Context, entry: String, folder: String, treeUri: Uri? = null): DebugAttackLog? {
             val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
             val suffix = sequence.getAndIncrement()
-            val folderPath = "$folder/$stamp"
+            var folderPath = "$folder/$stamp"
             val displayName = "timerz9turbo-$entry-$suffix.log"
             val values = ContentValues().apply {
                 put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
@@ -64,8 +66,14 @@ internal class DebugAttackLog private constructor(
                 put(MediaStore.MediaColumns.RELATIVE_PATH, folderPath)
             }
             val resolver = context.contentResolver
-            val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
-                ?: return null
+            val uri = if (treeUri != null) {
+                val root = DocumentsContract.buildDocumentUriUsingTree(treeUri, DocumentsContract.getTreeDocumentId(treeUri))
+                val directory = DocumentsContract.createDocument(resolver, root, DocumentsContract.Document.MIME_TYPE_DIR, stamp)
+                    ?: return null
+                folderPath = DocumentsContract.getDocumentId(directory).removePrefix("primary:")
+                DocumentsContract.createDocument(resolver, directory, "text/plain", displayName)
+            } else resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+            if (uri == null) return null
             return try {
                 val output = resolver.openOutputStream(uri, "w")
                     ?: error("cannot open debug log output")
@@ -76,7 +84,10 @@ internal class DebugAttackLog private constructor(
                     BufferedWriter(OutputStreamWriter(output, StandardCharsets.UTF_8)),
                 )
             } catch (_: Exception) {
-                resolver.delete(uri, null, null)
+                runCatching {
+                    if (treeUri != null) DocumentsContract.deleteDocument(resolver, uri)
+                    else resolver.delete(uri, null, null)
+                }
                 null
             }
         }
