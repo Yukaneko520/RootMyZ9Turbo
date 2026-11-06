@@ -84,6 +84,8 @@ struct child_report
 
 static _Atomic int g_go, g_stop, g_locker_started, g_locker_cpu;
 static char g_helper_name[16];
+static const char *g_completion_path;
+static int g_run_finished;
 static _Atomic int g_exec_tid, g_target_tgid;
 static void *g_frag_base;
 static size_t g_frag_len;
@@ -839,12 +841,11 @@ static long now_ms(void)
     return (long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
-/* Preserve helper mappings; terminating them can release state still held by the run. */
-static void pause_owned_helpers(void)
+static void terminate_owned_helpers(void)
 {
     DIR *processes = opendir("/proc");
     struct dirent *entry;
-    int paused = 0;
+    int killed = 0;
     if (!processes)
     {
         logf("[!] cannot enumerate Timer helpers errno=%d\n", errno);
@@ -871,22 +872,44 @@ static void pause_owned_helpers(void)
                 name[strcspn(name, "\n")] = '\0';
                 if (!strcmp(name, g_helper_name))
                 {
-                    if (syscall(SYS_pidfd_send_signal, process, SIGSTOP, NULL, 0) == 0)
-                        paused++;
+                    if (syscall(SYS_pidfd_send_signal, process, SIGKILL, NULL, 0) == 0)
+                        killed++;
                     else if (errno != ESRCH)
-                        logf("[!] cannot pause helper pid=%s errno=%d\n", entry->d_name, errno);
+                        logf("[!] cannot kill helper pid=%s errno=%d\n", entry->d_name, errno);
                 }
             }
         }
         close(process);
     }
     closedir(processes);
-    logf("[+] Timer helper SIGSTOP sent: %d\n", paused);
+    logf("[+] Timer helper SIGKILL sent: %d\n", killed);
+}
+
+static void finish_run(void)
+{
+    if (g_run_finished)
+        return;
+    g_run_finished = 1;
+    terminate_owned_helpers();
+    if (g_completion_path)
+    {
+        const unsigned char completed = 1;
+        /* The app pre-creates this file and removes it on timeout. Do not recreate it. */
+        int fd = open(g_completion_path, O_WRONLY | O_TRUNC | O_CLOEXEC);
+        if (fd < 0)
+            logf("[!] cannot open run completion file errno=%d\n", errno);
+        else
+        {
+            if (write(fd, &completed, sizeof(completed)) != sizeof(completed))
+                logf("[!] cannot write run completion errno=%d\n", errno);
+            close(fd);
+        }
+    }
 }
 
 static void park_forever(const char *why)
 {
-    pause_owned_helpers();
+    finish_run();
     logf("[!] %s -- parking without reap (zombie held)\n", why);
     fflush(stdout);
     for (;;)
@@ -937,13 +960,6 @@ static void write_ksu_script(void)
         "echo '[ksu] waiting for late-load to finish'\n"
         "while ksud_running; do sleep 0.2; done\n"
         "echo '[ksu] late-load finished'\n"
-        "i=0\n"
-        "while [ $i -lt 50 ]; do\n"
-        "  grep -q '^kernelsu ' /proc/modules && break\n"
-        "  i=$((i+1)); sleep 0.1\n"
-        "done\n"
-        "if grep -q '^kernelsu ' /proc/modules; then echo KSU_LOADED; "
-        "else echo KSU_MISSING; fi\n"
         "echo 1 > /sys/fs/selinux/enforce 2>/dev/null\n"
         "echo \"[ksu] enforce=$(getenforce)\"\n";
     int fd = open("/data/local/tmp/ksu_stage.sh",
@@ -1953,6 +1969,9 @@ int main(int argc, char **argv)
 
     setvbuf(stdout, NULL, _IONBF, 0);
     snprintf(g_helper_name, sizeof(g_helper_name), "tzh-%d", getpid());
+    g_completion_path = getenv("TIMERZ9_COMPLETION_PATH");
+    if (g_completion_path)
+        atexit(finish_run);
 
     if (argc > 1 && (!strcmp(argv[1], "--help") || !strcmp(argv[1], "-h") ||
                      !strcmp(argv[1], "help")))
@@ -2477,7 +2496,7 @@ int main(int argc, char **argv)
         park_forever("fake cred page held; reboot to clean");
     if (g_held)
         park_forever("root shell finished; failed-plant zombies are held");
-    pause_owned_helpers();
+    finish_run();
     logf("[+] done\n");
     return 0;
 }

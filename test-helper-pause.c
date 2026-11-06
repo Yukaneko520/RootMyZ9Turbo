@@ -55,14 +55,29 @@ int main(void)
         char marker;
         check(read(ready[0], &marker, 1) == 1, "helper readiness");
     }
-    /* Even a matching caller name must never suspend the credential holder. */
+    /* Even a matching caller name must never terminate the credential holder. */
     prctl(PR_SET_NAME, g_helper_name, 0, 0, 0);
-    pause_owned_helpers();
-    check(waitpid(test_children[0], &status, WUNTRACED) == test_children[0], "owned helper stops");
-    check(WIFSTOPPED(status) && WSTOPSIG(status) == SIGSTOP, "helper is suspended, not terminated");
+    terminate_owned_helpers();
+    check(waitpid(test_children[0], &status, 0) == test_children[0], "owned helper exits");
+    check(WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL, "helper is terminated with SIGKILL");
+    test_children[0] = 0;
     check(waitpid(test_children[1], &status, WUNTRACED | WNOHANG) == 0, "other run is untouched");
-    check(kill(test_children[0], SIGCONT) == 0, "suspension is reversible");
+    char completion_path[] = "helper-completion-XXXXXX";
+    int completion_fd = mkstemp(completion_path);
+    check(completion_fd >= 0, "create pending completion file");
+    close(completion_fd);
+    g_completion_path = completion_path;
+    finish_run();
+    completion_fd = open(completion_path, O_RDONLY);
+    unsigned char completed = 0;
+    check(completion_fd >= 0 && read(completion_fd, &completed, 1) == 1 && completed == 1,
+          "native completion is a binary event, not a log message");
+    close(completion_fd);
+    unlink(completion_path);
+    g_run_finished = 0;
+    finish_run();
+    check(access(completion_path, F_OK) != 0, "late completion cannot recreate a removed file");
     alarm(0);
-    puts("PASS: owned helper paused; other helper and caller unchanged");
+    puts("PASS: owned helper killed; caller/other run unchanged; completion protocol verified");
     return 0;
 }
