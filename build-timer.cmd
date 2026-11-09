@@ -13,6 +13,9 @@ if errorlevel 1 exit /b 1
 copy /y target-6.1.124.h target.h >nul
 call "%NDK%\aarch64-linux-android35-clang.cmd" -O2 -std=gnu11 -static -fno-stack-protector -fno-pic -I. -ffunction-sections -fdata-sections timer.c -o timer-6.1.124 -Wl,--gc-sections -Wl,-s -Wl,--build-id=none -Wl,-z,norelro -pthread
 if errorlevel 1 exit /b 1
+copy /y target-6.1.57.h target.h >nul
+call "%NDK%\aarch64-linux-android35-clang.cmd" -O2 -std=gnu11 -static -fno-stack-protector -fno-pic -I. -ffunction-sections -fdata-sections timer.c -o timer-6.1.57 -Wl,--gc-sections -Wl,-s -Wl,--build-id=none -Wl,-z,norelro -pthread
+if errorlevel 1 exit /b 1
 del target.h
-dir timer-6.1.145 timer-6.1.124
+dir timer-6.1.145 timer-6.1.124 timer-6.1.57
 echo BUILD_OK
