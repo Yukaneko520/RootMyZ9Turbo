@@ -2,7 +2,7 @@
 
 Android app for the Timer backend on Vivo/iQOO PD2352/V2352 devices. Requires
 Shizuku running as shell (uid 2000) and an installed SU manager. The app ships
-ARM64 Timer binaries for the existing 6.1.124/6.1.145 kernel mapping.
+ARM64 Timer binaries for the existing 6.1.57/6.1.124/6.1.145 kernel mapping.
 
 Features: manager selection, safemode, Timer execution/diagnostics, log export,
 and About. Kernel profile editing, offsets extraction and OTA parsing are not

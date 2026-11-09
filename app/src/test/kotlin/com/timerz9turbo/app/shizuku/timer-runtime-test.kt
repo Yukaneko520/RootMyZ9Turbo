@@ -17,6 +17,7 @@ class TimerRuntimeTest {
 
     @Test
     fun `selects the backend matching the existing kernel mapping`() {
+        assertEquals("timer-6.1.57", timerAssetFor("6.1.57-android14-11-maybe-dirty"))
         assertEquals("timer-6.1.124", timerAssetFor("6.1.124-android14-11-maybe-dirty"))
         assertEquals("timer", timerAssetFor("6.1.145-android14-11-maybe-dirty"))
     }

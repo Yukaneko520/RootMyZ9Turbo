@@ -133,7 +133,11 @@ class TimerUserService(private val context: Context) : ITimerUserService.Stub() 
     override fun destroy() { if (!running.get()) kotlin.system.exitProcess(0) }
 }
 
-internal fun timerAssetFor(release: String): String = if ("6.1.124" in release) "timer-6.1.124" else "timer"
+internal fun timerAssetFor(release: String): String = when {
+    "6.1.57" in release -> "timer-6.1.57"
+    "6.1.124" in release -> "timer-6.1.124"
+    else -> "timer"
+}
 
 internal fun withTemporaryKsud(file: File, onLog: (String) -> Unit, operation: (File) -> Int): Int = try {
     operation(file)
