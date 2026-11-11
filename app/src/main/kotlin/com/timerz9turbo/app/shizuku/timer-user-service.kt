@@ -133,11 +133,15 @@ class TimerUserService(private val context: Context) : ITimerUserService.Stub() 
     override fun destroy() { if (!running.get()) kotlin.system.exitProcess(0) }
 }
 
-internal fun timerAssetFor(release: String): String = when {
-    "6.1.57" in release -> "timer-6.1.57"
-    "6.1.124" in release -> "timer-6.1.124"
+internal fun timerAssetFor(release: String): String = when (knownKernelProfile(release)) {
+    "6.1.57" -> "timer-6.1.57"
+    "6.1.124" -> "timer-6.1.124"
     else -> "timer"
 }
+
+/** Kernel release substring identifying a shipped Timer backend, or null when unknown. */
+internal fun knownKernelProfile(release: String): String? =
+    listOf("6.1.57", "6.1.124", "6.1.145").firstOrNull { it in release }
 
 internal fun withTemporaryKsud(file: File, onLog: (String) -> Unit, operation: (File) -> Int): Int = try {
     operation(file)

@@ -69,6 +69,16 @@ internal fun AdvancedScreen(
                     )
                 }
             }
+            item(key = "kernel-only-match") {
+                Card {
+                    SwitchPreference(
+                        checked = state.kernelOnlyMatchEnabled,
+                        onCheckedChange = actions::onKernelOnlyMatchChanged,
+                        title = stringResource(R.string.kernel_only_match),
+                        summary = stringResource(R.string.kernel_only_match_summary),
+                    )
+                }
+            }
             item(key = "export") {
                 Card {
                     Column {

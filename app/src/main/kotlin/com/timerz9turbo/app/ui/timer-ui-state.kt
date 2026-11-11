@@ -21,6 +21,7 @@ data class TimerUiState(
     val aboutVisible: Boolean = false,
     val debugExportEnabled: Boolean = true,
     val debugExportLocation: String = "",
+    val kernelOnlyMatchEnabled: Boolean = false,
     val managerCandidates: List<ManagerScanner.Candidate> = emptyList(),
     val selectedManagerPackage: String? = null,
     val managerPickerVisible: Boolean = false,
@@ -52,6 +53,7 @@ interface TimerActions {
     fun onCloseAbout()
     fun onDebugExportChanged(enabled: Boolean)
     fun onDebugExportLocationPick()
+    fun onKernelOnlyMatchChanged(enabled: Boolean)
 }
 
 sealed interface TimerEffect {

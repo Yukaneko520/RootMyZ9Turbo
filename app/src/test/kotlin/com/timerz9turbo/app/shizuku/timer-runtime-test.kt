@@ -20,6 +20,15 @@ class TimerRuntimeTest {
         assertEquals("timer-6.1.57", timerAssetFor("6.1.57-android14-11-maybe-dirty"))
         assertEquals("timer-6.1.124", timerAssetFor("6.1.124-android14-11-maybe-dirty"))
         assertEquals("timer", timerAssetFor("6.1.145-android14-11-maybe-dirty"))
+        assertEquals("timer", timerAssetFor("6.6.89-android15-8-g0879e4330b3c"))
+    }
+
+    @Test
+    fun `only known kernel strings identify a profile`() {
+        assertEquals("6.1.57", knownKernelProfile("6.1.57-android14-11-maybe-dirty"))
+        assertEquals("6.1.124", knownKernelProfile("6.1.124-android14-11-maybe-dirty"))
+        assertEquals("6.1.145", knownKernelProfile("6.1.145-android14-11-maybe-dirty"))
+        assertNull(knownKernelProfile("6.6.89-android15-8-g0879e4330b3c"))
     }
 
     @Test(timeout = 3000)

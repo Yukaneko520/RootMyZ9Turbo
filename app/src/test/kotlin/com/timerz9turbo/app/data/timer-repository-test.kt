@@ -71,6 +71,47 @@ class TimerRepositoryTest {
     }
 
     @Test
+    fun `kernel-only match bypasses the device gate for known kernels`() {
+        val previous = System.getProperty("os.version")
+        try {
+            System.setProperty("os.version", "6.1.57-android14-11-maybe-dirty")
+            ShadowBuild.setDevice("unrelated-device")
+            ShadowBuild.setProduct("unrelated-product")
+            ShadowBuild.setModel("unrelated-model")
+            val repository = TimerRepository(RuntimeEnvironment.getApplication())
+            try {
+                repository.setKernelOnlyMatchEnabled(false)
+                assertFalse(repository.snapshot().kernelSupported)
+                repository.setKernelOnlyMatchEnabled(true)
+                assertTrue(repository.snapshot().kernelSupported)
+                repository.setKernelOnlyMatchEnabled(false)
+                assertFalse(repository.snapshot().kernelSupported)
+            } finally { repository.close() }
+        } finally {
+            if (previous != null) System.setProperty("os.version", previous)
+        }
+    }
+
+    @Test
+    fun `kernel-only match stays closed for unknown kernels`() {
+        val previous = System.getProperty("os.version")
+        try {
+            System.setProperty("os.version", "6.6.89-android15-8-g0879e4330b3c")
+            ShadowBuild.setDevice("unrelated-device")
+            ShadowBuild.setProduct("unrelated-product")
+            ShadowBuild.setModel("unrelated-model")
+            val repository = TimerRepository(RuntimeEnvironment.getApplication())
+            try {
+                repository.setKernelOnlyMatchEnabled(true)
+                assertFalse(repository.snapshot().kernelSupported)
+                repository.setKernelOnlyMatchEnabled(false)
+            } finally { repository.close() }
+        } finally {
+            if (previous != null) System.setProperty("os.version", previous)
+        }
+    }
+
+    @Test
     fun `export location rejects traversal and normalizes repeated separators`() {
         assertEquals("Download/Timer", normalizeDebugLocation(" /Download//Timer/ "))
         assertEquals(DebugSettings().exportLocation, normalizeDebugLocation("Download/../other"))

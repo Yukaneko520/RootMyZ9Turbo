@@ -41,6 +41,7 @@ class TimerViewModel(private val repository: TimerRepository) : ViewModel(), Tim
                 kernelSupported = snapshot.kernelSupported, safeModeEnabled = snapshot.safeModeEnabled,
                 shizukuStatus = snapshot.shizukuStatus, selectedManagerPackage = repository.selectedManagerPackage(),
                 debugExportEnabled = settings.exportEnabled, debugExportLocation = settings.exportLocation,
+                kernelOnlyMatchEnabled = repository.kernelOnlyMatchEnabled(),
             ) }
         }
     }
@@ -132,6 +133,10 @@ class TimerViewModel(private val repository: TimerRepository) : ViewModel(), Tim
         mutableState.update { it.copy(debugExportEnabled = enabled) }
     }
     override fun onDebugExportLocationPick() = send(TimerEffect.PickDebugFolder)
+    override fun onKernelOnlyMatchChanged(enabled: Boolean) {
+        repository.setKernelOnlyMatchEnabled(enabled)
+        refreshAccessStatus()
+    }
     fun onDebugExportLocationPicked(location: String?, treeUri: String? = null) {
         if (location == null) { send(TimerEffect.Toast(R.string.debug_export_location_unsupported)); return }
         if (runCatching { repository.setDebugExportLocation(location, treeUri) }.isFailure) {

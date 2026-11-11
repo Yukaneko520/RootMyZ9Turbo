@@ -41,6 +41,8 @@
     <string name="soc_label">SoC</string>
     <string name="diagnose_summary">IDs de rastreamento e diagnóstico de portabilidade (sem UAF)</string>
     <string name="diagnose">Diagnóstico</string>
+    <string name="kernel_only_match">Correspondência só do kernel</string>
+    <string name="kernel_only_match_summary">Executar se o kernel corresponder, sem verificar o modelo do dispositivo. Um perfil errado causa panic — execute o Diagnóstico primeiro.</string>
     <string name="manager_picker_no_detected">libksud.so não detectado. Use Mostrar todos os aplicativos para selecionar o gerenciador.</string>
     <string name="manager_picker_loading">Carregando aplicativos…</string>
     <string name="manager_picker_error">Não foi possível carregar os aplicativos. Reabra para tentar novamente.</string>

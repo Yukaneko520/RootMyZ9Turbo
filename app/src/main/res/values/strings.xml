@@ -42,6 +42,8 @@
     <string name="debug_export_location_unsupported">Pick a folder on internal storage (e.g. Download)</string>
     <string name="diagnose">Diagnose</string>
     <string name="diagnose_summary">Trace ids + porting diag (no UAF, safe to run)</string>
+    <string name="kernel_only_match">Kernel-only match</string>
+    <string name="kernel_only_match_summary">Run when the kernel matches, without checking the device model. A wrong profile panics the device — run Diagnose first.</string>
     <string name="manager_picker_no_detected">No libksud.so detected. Use Show all apps to select your manager.</string>
     <string name="manager_picker_loading">Loading apps…</string>
     <string name="manager_picker_error">Could not load apps. Reopen to retry.</string>
