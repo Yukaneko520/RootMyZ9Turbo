@@ -29,6 +29,7 @@ import top.yukonga.miuix.kmp.theme.lightColorScheme
 internal sealed interface TimerScreen : NavKey {
     data object Main : TimerScreen
     data object Advanced : TimerScreen
+    data object AdbRoot : TimerScreen
     data object About : TimerScreen
 }
 
@@ -38,6 +39,8 @@ internal fun navigationPath(state: TimerUiState): List<TimerScreen> = buildList 
         add(TimerScreen.Advanced)
         if (state.aboutVisible) add(TimerScreen.About)
     }
+    // The ADB setup is also reachable straight from the main status banner.
+    if (state.adbRootScreenVisible) add(TimerScreen.AdbRoot)
 }
 
 internal fun syncNavigationPath(backStack: NavBackStack, desired: List<TimerScreen>) {
@@ -55,6 +58,7 @@ private fun closeScreen(screen: TimerScreen, actions: TimerActions) {
     when (screen) {
         TimerScreen.Main -> Unit
         TimerScreen.Advanced -> actions.onCloseAdvanced()
+        TimerScreen.AdbRoot -> actions.onCloseAdbRoot()
         TimerScreen.About -> actions.onCloseAbout()
     }
 }
@@ -85,6 +89,8 @@ internal fun TimerApp(
                     effects = NavDisplayEffects(cornerClipRadius = rememberNavSystemCornerRadius()),
                     onBack = {
                         when {
+                            state.uptimeCooldownPickerVisible -> actions.onCloseUptimeCooldownPicker()
+                            state.managerPickerVisible -> actions.onCloseManagerPicker()
                             state.executionSheetVisible -> {
                                 if (state.executionSheetDismissible) actions.onCloseExecutionSheet()
                             }
@@ -104,12 +110,16 @@ internal fun TimerApp(
                     entry<TimerScreen.Advanced>(swipeDismiss = swipeBack) {
                         AdvancedScreen(state = state, actions = actions)
                     }
+                    entry<TimerScreen.AdbRoot>(swipeDismiss = swipeBack) {
+                        AdbRootScreen(state = state, actions = actions)
+                    }
                     entry<TimerScreen.About>(swipeDismiss = swipeBack) {
                         AboutScreen(onBack = actions::onCloseAbout)
                     }
                 }
                 TimerExecutionSheet(state = state, actions = actions)
                 TimerManagerPickerSheet(state = state, actions = actions)
+                TimerUptimeCooldownPickerSheet(state = state, actions = actions)
             }
         }
     }

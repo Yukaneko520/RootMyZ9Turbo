@@ -60,6 +60,15 @@ internal fun AdvancedScreen(
             contentPadding = pageContentPadding(paddingValues),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
+            item(key = "adb-root") {
+                Card {
+                    ArrowPreference(
+                        title = stringResource(R.string.adb_root_settings),
+                        summary = stringResource(R.string.adb_root_settings_summary),
+                        onClick = actions::onOpenAdbRoot,
+                    )
+                }
+            }
             item(key = "diagnose") {
                 Card {
                     ArrowPreference(

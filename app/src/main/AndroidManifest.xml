@@ -2,6 +2,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <!-- The local ADB client needs raw sockets even for loopback. -->
+    <uses-permission android:name="android.permission.INTERNET" />
     <!-- The root-manager picker supports arbitrary manager package names. -->
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
         tools:ignore="QueryAllPackagesPermission" />

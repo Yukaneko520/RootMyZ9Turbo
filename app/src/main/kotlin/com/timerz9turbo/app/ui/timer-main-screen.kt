@@ -17,6 +17,7 @@ import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.timerz9turbo.app.R
+import com.timerz9turbo.app.domain.model.AdbLinkStatus
 import com.timerz9turbo.app.domain.model.ShizukuStatus
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.Card
@@ -84,9 +85,13 @@ private fun MainContent(
         item(key = "run") {
             RunButton(
                 running = state.running,
-                supported = state.kernelSupported && state.shizukuStatus == ShizukuStatus.READY,
+                supported = state.kernelSupported && if (state.adbSettings.manualEnabled) {
+                    state.adbLinkStatus == AdbLinkStatus.READY
+                } else {
+                    state.shizukuStatus == ShizukuStatus.READY
+                },
                 onClick = actions::onRun,
-                onBlockedClick = actions::onStatusClick,
+                onBlockedClick = actions::onRunBlocked,
                 modifier = Modifier.fillMaxWidth(),
             )
         }
@@ -103,7 +108,10 @@ private fun ControlPanel(
         ActivationStatusCard(
             supported = state.kernelSupported,
             shizukuStatus = state.shizukuStatus,
+            adbEnabled = state.adbSettings.manualEnabled,
+            adbStatus = state.adbLinkStatus,
             onShizukuClick = actions::onStatusClick,
+            onAdbClick = actions::onAdbStatusClick,
             modifier = Modifier.fillMaxWidth(),
         )
         DeviceInfoCard(
@@ -130,6 +138,15 @@ private fun ControlPanel(
                 onCheckedChange = actions::onSafeModeChanged,
                 title = stringResource(R.string.safe_mode_label),
                 summary = stringResource(R.string.safe_mode_summary),
+            )
+            ArrowPreference(
+                title = stringResource(R.string.uptime_cooldown_title),
+                summary = when (state.uptimeCooldownSeconds) {
+                    0 -> stringResource(R.string.uptime_cooldown_none)
+                    60 -> stringResource(R.string.uptime_cooldown_60s_default)
+                    else -> stringResource(R.string.uptime_cooldown_seconds, state.uptimeCooldownSeconds)
+                },
+                onClick = actions::onOpenUptimeCooldownPicker,
             )
         }
         Card(modifier = modifier.padding(top = 12.dp)) {

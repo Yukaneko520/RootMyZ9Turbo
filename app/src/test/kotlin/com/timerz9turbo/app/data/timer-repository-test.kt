@@ -56,6 +56,21 @@ class TimerRepositoryTest {
     }
 
     @Test
+    fun `uptime cooldown defaults to 60 and persists across instances`() {
+        val context = RuntimeEnvironment.getApplication()
+        val first = TimerRepository(context)
+        try {
+            assertEquals(60, first.uptimeCooldownSeconds())
+            first.setUptimeCooldownSeconds(30)
+            assertEquals(30, first.uptimeCooldownSeconds())
+        } finally { first.close() }
+        val second = TimerRepository(context)
+        try {
+            assertEquals(30, second.uptimeCooldownSeconds())
+        } finally { second.close() }
+    }
+
+    @Test
     fun `device support does not depend on removed profiles`() {
         ShadowBuild.setDevice("PD2352")
         val repository = TimerRepository(RuntimeEnvironment.getApplication())

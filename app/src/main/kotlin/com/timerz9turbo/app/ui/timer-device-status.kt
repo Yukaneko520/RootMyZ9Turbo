@@ -17,6 +17,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.CheckCircleOutline
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.RemoveCircleOutline
+import androidx.compose.material.icons.rounded.WarningAmber
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -26,6 +27,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.timerz9turbo.app.R
+import com.timerz9turbo.app.domain.model.AdbLinkStatus
 import com.timerz9turbo.app.domain.model.ShizukuStatus
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.CardDefaults
@@ -38,12 +40,16 @@ import top.yukonga.miuix.kmp.utils.PressFeedbackType
 internal fun ActivationStatusCard(
     supported: Boolean,
     shizukuStatus: ShizukuStatus,
+    adbEnabled: Boolean,
+    adbStatus: AdbLinkStatus,
     onShizukuClick: () -> Unit,
+    onAdbClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val accessReady = shizukuStatus == ShizukuStatus.READY
+    val accessReady = if (adbEnabled) adbStatus == AdbLinkStatus.READY else shizukuStatus == ShizukuStatus.READY
     val ready = supported && accessReady
     val missing = !supported
+    val openAdbSetup = adbEnabled && supported && !accessReady
     val (backgroundColor, title, icon) = when {
         ready -> Triple(
             when {
@@ -51,7 +57,7 @@ internal fun ActivationStatusCard(
                 isSystemInDarkTheme() -> Color(0xFF1A3825)
                 else -> Color(0xFFDFFAE4)
             },
-            R.string.kernel_supported,
+            if (adbEnabled) R.string.adb_banner_label else R.string.kernel_supported,
             Icons.Rounded.CheckCircleOutline,
         )
 
@@ -67,11 +73,19 @@ internal fun ActivationStatusCard(
                 isSystemInDarkTheme() -> Color(0xFF3E2F1B)
                 else -> Color(0xFFFFF0DB)
             },
-            R.string.shizuku_label,
-            Icons.Rounded.ErrorOutline,
+            if (adbEnabled) R.string.adb_banner_label else R.string.shizuku_label,
+            if (adbEnabled) Icons.Rounded.WarningAmber else Icons.Rounded.ErrorOutline,
         )
     }
     val summary = when {
+        adbEnabled -> when (adbStatus) {
+            AdbLinkStatus.READY -> R.string.adb_status_ready
+            AdbLinkStatus.UNAUTHORIZED -> R.string.adb_status_unauthorized
+            AdbLinkStatus.NOT_CONFIGURED -> R.string.adb_status_not_configured
+            AdbLinkStatus.UNREACHABLE -> R.string.adb_status_unreachable
+            AdbLinkStatus.DISABLED -> R.string.adb_status_disabled
+        }
+
         ready -> R.string.shizuku_status_ready
         !supported -> R.string.kernel_unsupported_summary
         shizukuStatus == ShizukuStatus.PERMISSION_REQUIRED -> R.string.shizuku_status_permission_required
@@ -80,8 +94,12 @@ internal fun ActivationStatusCard(
     Card(
         modifier = modifier,
         colors = CardDefaults.defaultColors(color = backgroundColor),
-        onClick = if (supported && !accessReady) onShizukuClick else null,
-        showIndication = supported && !accessReady,
+        onClick = when {
+            openAdbSetup -> onAdbClick
+            !adbEnabled && supported && !accessReady -> onShizukuClick
+            else -> null
+        },
+        showIndication = openAdbSetup || (!adbEnabled && supported && !accessReady),
         pressFeedbackType = PressFeedbackType.Tilt,
     ) {
         Box(
@@ -95,7 +113,8 @@ internal fun ActivationStatusCard(
                 tint = if (MiuixTheme.isDynamicColor) {
                     when (icon) {
                         Icons.Rounded.CheckCircleOutline -> MiuixTheme.colorScheme.primary.copy(alpha = 0.8f)
-                        Icons.Rounded.RemoveCircleOutline ->
+                        Icons.Rounded.RemoveCircleOutline,
+                        Icons.Rounded.WarningAmber ->
                             MiuixTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.8f)
 
                         else -> MiuixTheme.colorScheme.onErrorContainer.copy(alpha = 0.8f)
@@ -103,7 +122,9 @@ internal fun ActivationStatusCard(
                 } else {
                     when (icon) {
                         Icons.Rounded.CheckCircleOutline -> Color(0xFF36D167)
-                        Icons.Rounded.RemoveCircleOutline -> Color(0xFFF5A623)
+                        Icons.Rounded.RemoveCircleOutline,
+                        Icons.Rounded.WarningAmber -> Color(0xFFF5A623)
+
                         else -> Color(0xFFF72727)
                     }
                 },

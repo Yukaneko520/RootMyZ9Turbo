@@ -2,6 +2,9 @@ package com.timerz9turbo.app.ui
 
 import com.timerz9turbo.app.data.ManagerScanner
 import com.timerz9turbo.app.R
+import com.timerz9turbo.app.domain.model.AdbLinkStatus
+import com.timerz9turbo.app.domain.model.AdbRootSettings
+import com.timerz9turbo.app.domain.model.AdbSetupSnapshot
 import com.timerz9turbo.app.domain.model.LogEntry
 import com.timerz9turbo.app.domain.model.ShizukuStatus
 
@@ -19,6 +22,7 @@ data class TimerUiState(
     val logLines: List<LogEntry> = emptyList(),
     val advancedScreenVisible: Boolean = false,
     val aboutVisible: Boolean = false,
+    val adbRootScreenVisible: Boolean = false,
     val debugExportEnabled: Boolean = true,
     val debugExportLocation: String = "",
     val kernelOnlyMatchEnabled: Boolean = false,
@@ -27,6 +31,12 @@ data class TimerUiState(
     val managerPickerVisible: Boolean = false,
     val managerLoading: Boolean = false,
     val managerLoadFailed: Boolean = false,
+    val adbSettings: AdbRootSettings = AdbRootSettings(),
+    val adbSnapshot: AdbSetupSnapshot = AdbSetupSnapshot(),
+    val adbBusy: Boolean = false,
+    val adbLinkStatus: AdbLinkStatus = AdbLinkStatus.DISABLED,
+    val uptimeCooldownSeconds: Int = 60,
+    val uptimeCooldownPickerVisible: Boolean = false,
 )
 
 internal fun TimerUiState.managerPickerMessage(showAll: Boolean): Int? = when {
@@ -41,6 +51,7 @@ interface TimerActions {
     fun onRun()
     fun onRunDiagnose()
     fun onStatusClick()
+    fun onRunBlocked()
     fun onCloseExecutionSheet()
     fun onCopyLogs()
     fun onSafeModeChanged(enabled: Boolean)
@@ -54,11 +65,23 @@ interface TimerActions {
     fun onDebugExportChanged(enabled: Boolean)
     fun onDebugExportLocationPick()
     fun onKernelOnlyMatchChanged(enabled: Boolean)
+    fun onAdbStatusClick()
+    fun onOpenAdbRoot()
+    fun onCloseAdbRoot()
+    fun onAdbApplyPort()
+    fun onAdbInstallKey()
+    fun onAdbResetSetup()
+    fun onAdbManualChanged(enabled: Boolean)
+    fun onOpenUptimeCooldownPicker()
+    fun onCloseUptimeCooldownPicker()
+    fun onUptimeCooldownSelected(seconds: Int)
 }
 
 sealed interface TimerEffect {
     data object PickDebugFolder : TimerEffect
     data class Toast(val resourceId: Int) : TimerEffect
+    data class ToastText(val text: String) : TimerEffect
+    data class ToastFormatted(val resourceId: Int, val arg: String) : TimerEffect
     data class Clipboard(val text: String) : TimerEffect
     data class KeepScreenAwake(val enabled: Boolean) : TimerEffect
     data object OpenShizuku : TimerEffect

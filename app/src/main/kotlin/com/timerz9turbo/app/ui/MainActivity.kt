@@ -47,6 +47,9 @@ class MainActivity : ComponentActivity() {
         when (effect) {
             TimerEffect.PickDebugFolder -> folderPicker.launch(null)
             is TimerEffect.Toast -> Toast.makeText(this, effect.resourceId, Toast.LENGTH_SHORT).show()
+            is TimerEffect.ToastText -> Toast.makeText(this, effect.text, Toast.LENGTH_SHORT).show()
+            is TimerEffect.ToastFormatted ->
+                Toast.makeText(this, getString(effect.resourceId, effect.arg), Toast.LENGTH_SHORT).show()
             is TimerEffect.Clipboard -> getSystemService(ClipboardManager::class.java)
                 ?.setPrimaryClip(ClipData.newPlainText("timerz9turbo-log", effect.text))
             is TimerEffect.KeepScreenAwake -> if (effect.enabled) {

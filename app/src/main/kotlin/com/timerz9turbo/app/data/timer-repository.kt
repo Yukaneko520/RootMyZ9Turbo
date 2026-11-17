@@ -3,22 +3,46 @@ package com.timerz9turbo.app.data
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
+import android.os.SystemClock
 import androidx.core.content.edit
 import com.timerz9turbo.app.BuildConfig
 import com.timerz9turbo.app.BuildInfo
+import com.timerz9turbo.app.adb.AdbConnectionManager
+import com.timerz9turbo.app.adb.AdbKeyManager
+import com.timerz9turbo.app.adb.AdbRootCoordinator
+import com.timerz9turbo.app.adb.AdbRootPreferences
+import com.timerz9turbo.app.adb.AdbSetupManager
+import com.timerz9turbo.app.domain.model.AdbLinkStatus
+import com.timerz9turbo.app.domain.model.AdbRootSettings
+import com.timerz9turbo.app.domain.model.AdbSetupSnapshot
 import com.timerz9turbo.app.domain.model.DebugSettings
+import com.timerz9turbo.app.domain.model.SetupActionResult
 import com.timerz9turbo.app.domain.model.TimerSnapshot
+import com.timerz9turbo.app.adb.ShellResult
+import com.timerz9turbo.app.adb.defaultExecuteSu
 import com.timerz9turbo.app.shizuku.ShizukuTimerRunner
 import com.timerz9turbo.app.shizuku.knownKernelProfile
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 
-class TimerRepository(context: Context) {
+class TimerRepository internal constructor(
+    context: Context,
+    suRunner: (String) -> ShellResult,
+) {
+    constructor(context: Context) : this(context, ::defaultExecuteSu)
+
     private companion object { const val PREF_KERNEL_ONLY_MATCH = "kernel_only_match" }
     private val context = context.applicationContext
     // Preserve manager and debug preferences from existing installations.
     private val preferences = this.context.getSharedPreferences("ghostlock_prefs", Context.MODE_PRIVATE)
     private val runner = ShizukuTimerRunner(this.context)
+    private val adbPreferences = AdbRootPreferences(this.context)
+    private val adbKeys = AdbKeyManager(this.context)
+    private val adbConnection = AdbConnectionManager(this.context, adbPreferences, adbKeys)
+    private val adbSetup = AdbSetupManager(this.context, adbPreferences, adbKeys, adbConnection, suRunner)
+    private val adbCoordinator = AdbRootCoordinator(this.context, adbConnection)
     private var safeModeEnabled = false
 
     fun snapshot(): TimerSnapshot {
@@ -57,10 +81,47 @@ class TimerRepository(context: Context) {
     fun setShizukuStatusListener(listener: (() -> Unit)?) = runner.setStatusListener(listener)
     fun close() = runner.close()
 
-    suspend fun run(diagnose: Boolean, onLog: (String) -> Unit): Int {
+    fun adbSettings(): AdbRootSettings = adbPreferences.settings()
+    fun adbLocalSnapshot(): AdbSetupSnapshot = adbSetup.localSnapshot()
+    fun adbLinkStatus(): AdbLinkStatus = adbConnection.status()
+    fun setAdbManualEnabled(enabled: Boolean) { adbPreferences.manualAdbEnabled = enabled }
+
+    suspend fun adbRefreshSetup(): AdbSetupSnapshot = adbSetup.snapshot()
+
+    internal suspend fun adbApplyPersistPort(): SetupActionResult = adbSetup.applyPersistPort()
+    internal suspend fun adbInstallKey(): SetupActionResult = adbSetup.installKey()
+    internal suspend fun adbResetSetup(): SetupActionResult = adbSetup.resetSetup()
+
+    fun uptimeCooldownSeconds(): Int = preferences.getInt("uptime_cooldown_seconds", 60)
+    fun setUptimeCooldownSeconds(seconds: Int) {
+        preferences.edit { putInt("uptime_cooldown_seconds", seconds) }
+    }
+
+    suspend fun run(diagnose: Boolean, onLog: (String) -> Unit): Int =
+        runLogged("Shizuku", if (diagnose) "diagnose" else "timer", diagnose, onLog) { log, debugDir ->
+            if (diagnose) runner.runDiagnose(log) else runner.run(
+                safeModeEnabled,
+                debugDir,
+                selectedManagerPackage(),
+                log,
+            )
+        }
+
+    suspend fun runAdb(diagnose: Boolean, safeMode: Boolean, onLog: (String) -> Unit): Int =
+        runLogged("ADB", if (diagnose) "diagnose" else "timer", diagnose, onLog) { log, _ ->
+            adbCoordinator.runManual(safeMode, selectedManagerPackage(), diagnose, log)
+        }
+
+    private suspend fun runLogged(
+        mode: String,
+        kind: String,
+        diagnose: Boolean,
+        onLog: (String) -> Unit,
+        execute: suspend ((String) -> Unit, String?) -> Int,
+    ): Int {
         val settings = debugSettings()
         val archive = if (settings.exportEnabled) runCatching {
-            DebugAttackLog.open(context, if (diagnose) "diagnose" else "timer", settings.exportLocation,
+            DebugAttackLog.open(context, kind, settings.exportLocation,
                 preferences.getString("debug_export_tree_uri", null)?.let(Uri::parse))
         }.getOrNull() else null
         if (settings.exportEnabled && archive == null) onLog("<k> warning: cannot create debug log; choose Save location again")
@@ -70,14 +131,37 @@ class TimerRepository(context: Context) {
         }
         return try {
             log("<k> TimerZ9Turbo ${BuildConfig.VERSION_NAME}+${BuildConfig.VERSION_CODE} build ${BuildInfo.BUILD_TIME_LABEL}")
+            log("<k> Device: ${Build.MANUFACTURER} ${Build.MODEL} (${Build.DEVICE})")
+            log("<k> Root mode: $mode")
+            log("<k> Binary timer path: /data/local/tmp/timer")
+
+            if (!diagnose) {
+                val cooldownSec = uptimeCooldownSeconds()
+                val uptimeSec = SystemClock.elapsedRealtime() / 1000L
+                val remaining = if (cooldownSec > 0 && uptimeSec < cooldownSec) cooldownSec - uptimeSec else 0L
+                if (remaining > 0L) {
+                    log("<k> Uptime cooldown: scheduled (${remaining}s remaining | uptime: ${uptimeSec}s / target: ${cooldownSec}s)")
+                    log("<s> Waiting for uptime cooldown (${remaining}s remaining)...")
+                    for (sec in remaining downTo 1) {
+                        if (sec == remaining || sec % 10L == 0L || sec <= 5L) {
+                            log("<s> Countdown: ${sec}s...")
+                        }
+                        delay(1000L)
+                    }
+                    val finishedUptime = SystemClock.elapsedRealtime() / 1000L
+                    log("[+] Cooldown completed (uptime: ${finishedUptime}s), starting payload")
+                } else if (cooldownSec > 0) {
+                    log("<k> Uptime cooldown: none (uptime: ${uptimeSec}s >= target: ${cooldownSec}s)")
+                } else {
+                    log("<k> Uptime cooldown: disabled (0s)")
+                }
+            } else {
+                log("<k> Uptime cooldown: skipped (diagnose mode)")
+            }
+
             if (!diagnose && kernelOnlyMatchEnabled()) log("<s> warning: kernel-only match on, device model not checked")
             archive?.let { log("<k> debug log: ${it.folderPath}/${it.displayName}") }
-            if (diagnose) runner.runDiagnose(log) else runner.run(
-                safeModeEnabled,
-                archive?.folderFile?.absolutePath,
-                selectedManagerPackage(),
-                log,
-            )
+            execute(log, archive?.folderFile?.absolutePath)
         } finally {
             runCatching { archive?.close() }
         }
