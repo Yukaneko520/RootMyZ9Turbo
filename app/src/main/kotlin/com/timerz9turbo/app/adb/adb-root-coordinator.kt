@@ -53,7 +53,7 @@ internal class AdbRootCoordinator(
     }
 
     private suspend fun closeAdbPort(client: AdbClient, onLog: (String) -> Unit): Boolean {
-        val detached = "su -c 'setsid sh -c \"sleep 1; setprop service.adb.tcp.port -1; setprop ctl.restart adbd\" >/dev/null 2>&1 &'"
+        val detached = "su -c 'setsid sh -c \"sleep 1; setprop service.adb.tcp.port -1; iptables -D INPUT -p tcp --dport 5555 ! -i lo -j DROP 2>/dev/null; ip6tables -D INPUT -p tcp --dport 5555 ! -i lo -j DROP 2>/dev/null; setprop ctl.restart adbd\" >/dev/null 2>&1 &'"
         runCatching {
             client.exec(detached, timeoutMs = 5_000)
         }

@@ -133,6 +133,8 @@ internal class AdbSetupManager(
         try {
             val script = "setprop persist.adb.tcp.port ${AdbSetupSnapshot.ADB_TCP_PORT} && " +
                 "setprop service.adb.tcp.port '' && " +
+                "iptables -C INPUT -p tcp --dport 5555 ! -i lo -j DROP 2>/dev/null || iptables -I INPUT -p tcp --dport 5555 ! -i lo -j DROP || true; " +
+                "ip6tables -C INPUT -p tcp --dport 5555 ! -i lo -j DROP 2>/dev/null || ip6tables -I INPUT -p tcp --dport 5555 ! -i lo -j DROP || true; " +
                 "setprop ctl.restart adbd"
             val res = suRunner(script)
             if (res.exitCode != 0) {
@@ -190,6 +192,8 @@ internal class AdbSetupManager(
             val script = "setprop persist.adb.tcp.port '' && " +
                 "setprop service.adb.tcp.port '' && " +
                 "settings delete global adb_allowed_connection_time; " +
+                "iptables -D INPUT -p tcp --dport 5555 ! -i lo -j DROP 2>/dev/null; " +
+                "ip6tables -D INPUT -p tcp --dport 5555 ! -i lo -j DROP 2>/dev/null; " +
                 "setprop ctl.restart adbd"
             val res = suRunner(script)
             if (res.exitCode != 0) {

@@ -42,7 +42,9 @@ internal class AdbTimerRunner(
                 while [ ! -s ${q(completion)} ] && [ ${'$'}i -lt 600 ]; do sleep 0.25; i=${'$'}((i+1)); done
                 sleep 0.5
                 kill ${'$'}TL 2>/dev/null
-                wait ${'$'}TL 2>/dev/null
+                sleep 0.1
+                kill -9 ${'$'}TL 2>/dev/null
+                wait ${'$'}TL 2>/dev/null || true
                 if [ -s ${q(completion)} ]; then
                     printf '\n__TZ9_COMPLETE__%s\n' "${'$'}(od -An -t u1 ${q(completion)} | tr -d ' ')"
                 else

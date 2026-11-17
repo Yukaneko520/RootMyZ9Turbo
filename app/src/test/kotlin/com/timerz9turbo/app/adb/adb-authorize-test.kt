@@ -201,6 +201,63 @@ class AdbAuthorizeHandshakeTest {
                 executor.shutdownNow()
             }
         }
+
+    @Test
+    fun `shell stream acknowledges WRTE with correct local and remote stream IDs`() {
+        ServerSocket(0, 1, InetAddress.getByName("127.0.0.1")).use { server ->
+            val executor = Executors.newSingleThreadExecutor()
+            try {
+                executor.submit {
+                    server.accept().use { socket ->
+                        val input = DataInputStream(socket.getInputStream())
+                        val output = DataOutputStream(socket.getOutputStream())
+                        AdbProtocol.readPacket(input) // CNXN
+                        AdbProtocol.writePacket(
+                            output,
+                            AdbProtocol.A_CNXN,
+                            AdbProtocol.VERSION,
+                            AdbProtocol.MAX_PAYLOAD,
+                            "device::".toByteArray(StandardCharsets.UTF_8),
+                        )
+
+                        val openPacket = AdbProtocol.readPacket(input) // OPEN
+                        val hostLocalId = openPacket.arg0
+                        val deviceLocalId = 9999
+                        // Reply OKAY to OPEN: arg0=deviceLocalId, arg1=hostLocalId
+                        AdbProtocol.writePacket(output, AdbProtocol.A_OKAY, deviceLocalId, hostLocalId)
+
+                        // Send WRTE: arg0=deviceLocalId, arg1=hostLocalId
+                        val testPayload = "hello world\n".toByteArray(StandardCharsets.UTF_8)
+                        AdbProtocol.writePacket(output, AdbProtocol.A_WRTE, deviceLocalId, hostLocalId, testPayload)
+
+                        // Read OKAY acknowledgement from client:
+                        val ackPacket = AdbProtocol.readPacket(input)
+                        assertEquals(AdbProtocol.A_OKAY, ackPacket.command)
+                        assertEquals(hostLocalId, ackPacket.arg0)
+                        assertEquals(deviceLocalId, ackPacket.arg1)
+
+                        // Send CLSE to finish
+                        AdbProtocol.writePacket(output, AdbProtocol.A_CLSE, deviceLocalId, hostLocalId)
+                    }
+                }
+                val client = AdbClient(
+                    port = server.localPort,
+                    authenticator = FakeAuthenticator(),
+                    connectTimeoutMs = 2_000,
+                    defaultReadTimeoutMs = 5_000,
+                )
+                client.use {
+                    it.connect()
+                    val lines = mutableListOf<String>()
+                    val res = it.shell("echo hello") { line -> lines.add(line) }
+                    assertEquals("hello world\n", res)
+                    assertEquals(listOf("hello world"), lines)
+                }
+            } finally {
+                executor.shutdownNow()
+            }
+        }
+    }
 }
 
 class AdbSetupSnapshotKeyTest {

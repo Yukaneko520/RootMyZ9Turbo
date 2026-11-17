@@ -201,7 +201,7 @@ internal class AdbClient(
     }
 
     private fun acknowledge(packet: AdbPacket, localId: Int) {
-        if (packet.arg1 == localId) writePacket(AdbProtocol.A_OKAY, packet.arg0, localId)
+        if (packet.arg1 == localId) writePacket(AdbProtocol.A_OKAY, localId, packet.arg0)
     }
 
     private class LineSink(private val onLine: (String) -> Unit) {
