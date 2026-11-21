@@ -31,7 +31,7 @@ class TimerRuntimeTest {
         assertNull(knownKernelProfile("6.6.89-android15-8-g0879e4330b3c"))
     }
 
-    @Test(timeout = 40_000)
+    @Test(timeout = 3000)
     fun `success log cannot bypass kernel confirmation`() {
         val log = temporary.newFile().apply { writeText("[*] starting\r\n\nKSU_LOADED\r\n") }
         val lines = mutableListOf<String>()
@@ -60,20 +60,6 @@ class TimerRuntimeTest {
             assertFalse(awaitTimerLoaded(temporary.newFile(), completion, confirmKernel = { probes++; true }) {})
             assertEquals(0, probes)
         }
-    }
-
-    @Test(timeout = 30_000)
-    fun `completion retries confirmation while the module still reports version zero`() {
-        // A loaded-but-not-initialised module answers `Kernel Version: 0`.
-        // The first samples must not be treated as a final failure.
-        val completion = completed()
-        var probes = 0
-        val ok = awaitTimerLoaded(temporary.newFile(), completion, confirmKernel = {
-            probes++
-            probes >= 3
-        }) {}
-        assertTrue("confirmation should succeed once the module initialises", ok)
-        assertTrue("confirmation must be retried, not sampled once", probes >= 3)
     }
 
     @Test(timeout = 3000)

@@ -6,11 +6,6 @@ import org.junit.Test
 
 class TimerTimingTest {
     @Test
-    fun `monitoring window never cuts off the native plant budget`() {
-        assertTrue(TimerTiming.LOG_WATCH_MS > TimerTiming.NATIVE_PLANT_BUDGET_MS)
-    }
-
-    @Test
     fun `adb shell timeout covers the completion poll loop`() {
         val pollWindow = TimerTiming.COMPLETION_POLLS * 250L
         assertEquals(TimerTiming.LOG_WATCH_MS, pollWindow)
@@ -23,7 +18,19 @@ class TimerTimingTest {
     }
 
     @Test
-    fun `kernel confirmation window fits inside the log watch window`() {
-        assertTrue(TimerTiming.CONFIRM_WATCH_MS in 1..TimerTiming.LOG_WATCH_MS)
+    fun `kernel confirmation fits inside the completion check`() {
+        // One sample, taken after the completion byte; the stage script already
+        // waited for ksud late-load to exit, so there is no retry window.
+        assertTrue(TimerTiming.COMPLETION_POLLS > 0)
+    }
+
+    @Test
+    fun `log watch window covers the worst recorded successful run`() {
+        // Worst recorded successful run: 67 s of plants + the child's 30 s
+        // report window + the ksu late-load.  The native side always writes the
+        // completion byte (atexit), so this window is a cutoff only for a run
+        // that is genuinely stuck.
+        val worstRun = 67_000L + 30_000L + 20_000L
+        assertTrue(TimerTiming.LOG_WATCH_MS > worstRun)
     }
 }

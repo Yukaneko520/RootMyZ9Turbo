@@ -39,29 +39,21 @@ JDK 25 toolchain. APKs are under `build/app/outputs/apk/release/`.
   positive kernel version from the selected ksud's read-only `debug version`
   query. Log messages never decide success or failure. Completion files are
   removed after monitoring; late native exits cannot recreate them.
-- Timing is shared in `TimerTiming`: the native plant budget is 110 s and the
-  app watches for 150 s, so the native process always reports its own result
-  (including a rejected KASLR slide) instead of being cut off mid-plant.
 - Native helpers carry a `tzh-<owner PID>` name. When the run parks or finishes,
   it sends SIGKILL only to its own helpers. The credential holder stays alive;
-  held zombies are not reaped. Existing helpers from older binaries are not
-  changed by this update. This termination path still needs on-device testing.
+  held zombies are not reaped. Each helper also exits on its own once the
+  process that owns its address space dies, so a finished plant cannot leave a
+  process spinning.
 - Executables are installed by temporary-file rename. Manager/debug preferences
   retain their existing storage key; existing saved user documents are untouched.
 - Picked log folders use their persisted document-tree URI, including primary
   storage folders outside Download. The default destination still uses MediaStore.
   Re-select a folder saved by older builds once to retain its URI permission.
-  If SAF initialization cannot create or open the log (an exception or null result),
-  it tries MediaStore at `Download/timerZ9Turbo-log/<timestamp>` without changing
-  the saved folder or URI preferences. A runtime SAF write or flush failure retries
-  the failed line once in that default MediaStore destination; future lines go
-  there, while earlier lines remain in the SAF file. The UI warns and shows the
-  new log destination; a running operation's dump destination is not moved.
 - Build 6 uses Timer-only AIDL and a new service component, replacing ignored
   CPU/profile/force-attack arguments and the obsolete status callback.
 
 Native source is maintained separately at branch `timer-native`. The packaged
-binaries are built by `timer-native/build-timer.cmd`, which now publishes each
+binaries are built by `timer-native/build-timer.cmd`, which publishes each
 binary straight into `app/src/main/assets`; `TimerAssetTest` fails the build if
 a payload is missing, truncated or duplicated across profiles. Kernel offsets
 are unchanged. Content detection and host tests do not validate an on-device

@@ -47,19 +47,19 @@ class FormatLogUseCase {
     private fun isTimerMilestone(line: String): Boolean = listOf(
         "OK (attempt", "de-tag done", "writes landed", "KSU_LOADED",
         "woke uid=0 euid=0", "uid=0 euid=0", "late-load rc=0", "kill disabled",
-        "stage ", " done in ", "spray pool",
+        "stage ", "spray pool", "child heartbeat", "child report",
     ).any(line::contains)
 
     /* Soft failure: run continues, operator should notice (yellow, not red). */
     private fun isTimerSoftFail(line: String): Boolean = listOf(
         "retrying", "retryable", "burst missed", "holding zombie", "exec succeeded",
-        "out of time", "unusable slide", "unusable site0", "no KASLR slide",
+        "no KASLR slide", "no spray sockets", "cannot write /data/local/tmp/ksu_stage.sh",
     ).any(line::contains)
 
     private fun isTimerProgress(line: String): Boolean = listOf(
         "] stage ", "plant1 ", "recs=", "slab", "burst", "free_seen", "reaped",
         "write mode=", "fake cred ", "[ids]", "[base]", "[cred]", "[slab]",
-        "endgame", "de-tag:", "pid=", "made=",
+        "endgame", "de-tag:", "pid=", "made=", "[diag]",
     ).any(line::contains)
 
     private fun resultTone(text: String): LogTone =

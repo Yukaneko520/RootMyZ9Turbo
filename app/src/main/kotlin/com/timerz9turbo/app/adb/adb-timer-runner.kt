@@ -137,27 +137,21 @@ internal class AdbTimerRunner(
     }
 
     /**
-     * Waits for the manager to report a positive kernel version.
+     * Asks the manager for the loaded kernel version.
      *
-     * A module that is loaded but not yet initialised answers
-     * `Kernel Version: 0`, so this polls for the shared confirmation window
-     * instead of sampling three times in ~1.5 s.  Getting this wrong reports a
-     * fully-rooted run as "KernelSU not confirmed".
+     * The native stage script waits for `ksud late-load` to exit before the
+     * child does, so a single sample after completion is enough.  Every
+     * recorded run that answered `Kernel Version: 0` also had a native failure
+     * signature in its log.
      */
     private fun confirmKernel(onLog: (String) -> Unit): Boolean {
-        val deadline = System.nanoTime() + TimerTiming.CONFIRM_WATCH_MS * 1_000_000L
-        while (true) {
-            val probe = runCatching {
-                client.exec("$KSUD_REMOTE debug version", timeoutMs = 6_000)
-            }.getOrNull()
-            val version = probe?.let { kernelVersionFromOutput(it.output) }
-            if (probe != null && probe.exitCode == 0 && version != null) {
-                onLog("[ksu] kernel confirmed: version=$version")
-                return true
-            }
-            if (System.nanoTime() >= deadline) return false
-            Thread.sleep(500)
-        }
+        val probe = runCatching {
+            client.exec("$KSUD_REMOTE debug version", timeoutMs = 6_000)
+        }.getOrNull() ?: return false
+        val version = kernelVersionFromOutput(probe.output) ?: return false
+        if (probe.exitCode != 0) return false
+        onLog("[ksu] kernel confirmed: version=$version")
+        return true
     }
 
     private fun grepSeccomp(): String = runCatching {
