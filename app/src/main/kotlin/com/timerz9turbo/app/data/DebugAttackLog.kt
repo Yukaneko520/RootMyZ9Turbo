@@ -7,6 +7,7 @@ import android.net.Uri
 import android.os.Environment
 import android.provider.MediaStore
 import android.provider.DocumentsContract
+import com.timerz9turbo.app.domain.model.DebugSettings
 import java.io.BufferedWriter
 import java.io.Closeable
 import java.io.File
@@ -22,9 +23,17 @@ internal class DebugAttackLog private constructor(
     private val context: Context,
     val displayName: String,
     /** Primary-storage-relative folder that holds the attempt log and its dumps. */
-    val folderPath: String,
-    private val writer: BufferedWriter,
+    folderPath: String,
+    private var writer: BufferedWriter,
 ) : Closeable {
+    var folderPath: String = folderPath
+        private set
+    var usedFallback: Boolean = false
+        private set
+    private var fallback: (() -> DebugAttackLog?)? = null
+    private val sidecarFolders = linkedSetOf(folderPath)
+    private var closed = false
+
     /** Absolute destination for Timer log copies. */
     @Suppress("DEPRECATION")
     val folderFile: File
@@ -32,6 +41,25 @@ internal class DebugAttackLog private constructor(
 
     @Synchronized
     fun append(line: String) {
+        check(!closed) { "debug log is closed" }
+        try {
+            writeLine(line)
+        } catch (failure: Exception) {
+            val openFallback = fallback ?: throw failure
+            // Retry the failed line only once; retain the earlier SAF log as-is.
+            fallback = null
+            val replacement = openFallback() ?: throw failure
+            val previousWriter = writer
+            writer = replacement.writer
+            folderPath = replacement.folderPath
+            sidecarFolders += folderPath
+            usedFallback = true
+            runCatching { previousWriter.close() }
+            writeLine(line)
+        }
+    }
+
+    private fun writeLine(line: String) {
         writer.write(line)
         writer.newLine()
         writer.flush()
@@ -39,15 +67,26 @@ internal class DebugAttackLog private constructor(
 
     @Synchronized
     override fun close() {
-        writer.close()
-        publishSidecars()
+        if (closed) return
+        closed = true
+        fallback = null
+        try {
+            writer.close()
+        } finally {
+            publishSidecars()
+        }
     }
 
     /** Ask MediaStore to index the root-written dumps so file managers show them. */
     private fun publishSidecars() {
-        val paths = folderFile.listFiles().orEmpty().filter { it.isFile }.map { it.absolutePath }
-        if (paths.isEmpty()) return
         runCatching {
+            // A running operation may still have written dumps to the original folder.
+            @Suppress("DEPRECATION")
+            val paths = sidecarFolders.flatMap { folder ->
+                File(Environment.getExternalStorageDirectory(), folder).listFiles().orEmpty()
+                    .filter { it.isFile }.map { it.absolutePath }
+            }
+            if (paths.isEmpty()) return
             MediaScannerConnection.scanFile(context, paths.toTypedArray(), null, null)
         }
     }
@@ -58,23 +97,46 @@ internal class DebugAttackLog private constructor(
         fun open(context: Context, entry: String, folder: String, treeUri: Uri? = null): DebugAttackLog? {
             val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
             val suffix = sequence.getAndIncrement()
-            var folderPath = "$folder/$stamp"
             val displayName = "timerz9turbo-$entry-$suffix.log"
-            val values = ContentValues().apply {
-                put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
-                put(MediaStore.MediaColumns.MIME_TYPE, "text/plain")
-                put(MediaStore.MediaColumns.RELATIVE_PATH, folderPath)
+            if (treeUri == null) return openDestination(context, folder, stamp, displayName)
+
+            val openFallback = {
+                openDestination(context, DebugSettings().exportLocation, stamp, displayName)
             }
+            val selected = openDestination(context, folder, stamp, displayName, treeUri)
+            if (selected != null) {
+                selected.fallback = openFallback
+                return selected
+            }
+            return openFallback()?.apply { usedFallback = true }
+        }
+
+        private fun openDestination(
+            context: Context,
+            folder: String,
+            stamp: String,
+            displayName: String,
+            treeUri: Uri? = null,
+        ): DebugAttackLog? {
             val resolver = context.contentResolver
-            val uri = if (treeUri != null) {
-                val root = DocumentsContract.buildDocumentUriUsingTree(treeUri, DocumentsContract.getTreeDocumentId(treeUri))
-                val directory = DocumentsContract.createDocument(resolver, root, DocumentsContract.Document.MIME_TYPE_DIR, stamp)
-                    ?: return null
-                folderPath = DocumentsContract.getDocumentId(directory).removePrefix("primary:")
-                DocumentsContract.createDocument(resolver, directory, "text/plain", displayName)
-            } else resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
-            if (uri == null) return null
+            var uri: Uri? = null
             return try {
+                var folderPath = "$folder/$stamp"
+                uri = if (treeUri != null) {
+                    val root = DocumentsContract.buildDocumentUriUsingTree(treeUri, DocumentsContract.getTreeDocumentId(treeUri))
+                    val directory = DocumentsContract.createDocument(resolver, root, DocumentsContract.Document.MIME_TYPE_DIR, stamp)
+                        ?: return null
+                    folderPath = DocumentsContract.getDocumentId(directory).removePrefix("primary:")
+                    DocumentsContract.createDocument(resolver, directory, "text/plain", displayName)
+                } else {
+                    val values = ContentValues().apply {
+                        put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
+                        put(MediaStore.MediaColumns.MIME_TYPE, "text/plain")
+                        put(MediaStore.MediaColumns.RELATIVE_PATH, folderPath)
+                    }
+                    resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                }
+                if (uri == null) return null
                 val output = resolver.openOutputStream(uri, "w")
                     ?: error("cannot open debug log output")
                 DebugAttackLog(
@@ -84,7 +146,7 @@ internal class DebugAttackLog private constructor(
                     BufferedWriter(OutputStreamWriter(output, StandardCharsets.UTF_8)),
                 )
             } catch (_: Exception) {
-                runCatching {
+                if (uri != null) runCatching {
                     if (treeUri != null) DocumentsContract.deleteDocument(resolver, uri)
                     else resolver.delete(uri, null, null)
                 }

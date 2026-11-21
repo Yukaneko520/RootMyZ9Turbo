@@ -132,7 +132,7 @@ internal class AdbSetupManager(
     suspend fun applyPersistPort(): SetupActionResult = withContext(Dispatchers.IO) {
         try {
             val script = "setprop persist.adb.tcp.port ${AdbSetupSnapshot.ADB_TCP_PORT} && " +
-                "setprop service.adb.tcp.port '' && " +
+                "setprop service.adb.tcp.port ${AdbSetupSnapshot.ADB_TCP_PORT} && " +
                 "iptables -C INPUT -p tcp --dport 5555 ! -i lo -j DROP 2>/dev/null || iptables -I INPUT -p tcp --dport 5555 ! -i lo -j DROP || true; " +
                 "ip6tables -C INPUT -p tcp --dport 5555 ! -i lo -j DROP 2>/dev/null || ip6tables -I INPUT -p tcp --dport 5555 ! -i lo -j DROP || true; " +
                 "setprop ctl.restart adbd"

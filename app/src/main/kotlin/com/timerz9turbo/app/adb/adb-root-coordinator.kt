@@ -52,11 +52,31 @@ internal class AdbRootCoordinator(
         return false
     }
 
+    /**
+     * Turns the adb TCP listener off again.
+     *
+     * Only `service.adb.tcp.port` is touched: it is the non-persistent override
+     * for this boot, so setting -1 disables the listener without changing the
+     * user's saved `persist.adb.tcp.port`.  adbd re-reads the property on
+     * start, so every adbd instance is killed and init respawns it without a
+     * TCP listener.
+     */
     private suspend fun closeAdbPort(client: AdbClient, onLog: (String) -> Unit): Boolean {
-        val detached = "su -c 'setsid sh -c \"sleep 1; setprop service.adb.tcp.port -1; iptables -D INPUT -p tcp --dport 5555 ! -i lo -j DROP 2>/dev/null; ip6tables -D INPUT -p tcp --dport 5555 ! -i lo -j DROP 2>/dev/null; setprop ctl.restart adbd\" >/dev/null 2>&1 &'"
-        runCatching {
-            client.exec(detached, timeoutMs = 5_000)
+        val stop = "su -c 'setprop service.adb.tcp.port -1; " +
+            "killall -9 adbd 2>/dev/null; true'"
+        onLog("<s> stopping adbd to close the ADB TCP port")
+        runCatching { client.exec(stop, timeoutMs = 3_000) }
+            .onFailure { error ->
+                onLog("<s> adbd stop: connection dropped (${error.message}) " +
+                    "- expected when adbd is killed")
+            }
+
+        if (!adbPortOpen()) {
+            onLog("[+] ADB TCP port closed")
+            return true
         }
+
+        // init respawns adbd; give it time to come up without the listener.
         repeat(8) {
             delay(500)
             if (!adbPortOpen()) {

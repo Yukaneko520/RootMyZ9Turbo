@@ -2,6 +2,7 @@ package com.timerz9turbo.app.adb
 
 import android.content.Context
 import com.timerz9turbo.app.data.ManagerScanner
+import com.timerz9turbo.app.shizuku.TimerTiming
 import com.timerz9turbo.app.shizuku.kernelVersionFromOutput
 import com.timerz9turbo.app.shizuku.timerAssetFor
 
@@ -24,7 +25,7 @@ internal class AdbTimerRunner(
             onLog("<s> ADB shell ready; staging native payload")
             runRemote("mkdir -p /data/local/tmp/timerZ9")
             runRemote("cp ${q(resolved.file.absolutePath)} $KSUD_REMOTE && chmod 755 $KSUD_REMOTE")
-            ensureTimerBinary()
+            ensureTimerBinary(onLog)
             runRemote("printf '%s\\n' ${q(resolved.packageName)} > $SU_PACKAGE_REMOTE")
             runRemote("printf '%s\\n' $KSUD_REMOTE > $KSUD_PATH_REMOTE")
             onLog("<s> SU manager: ${resolved.packageName}")
@@ -39,7 +40,7 @@ internal class AdbTimerRunner(
                 tail -n +1 -f ${q(logFile)} &
                 TL=${'$'}!
                 i=0
-                while [ ! -s ${q(completion)} ] && [ ${'$'}i -lt 600 ]; do sleep 0.25; i=${'$'}((i+1)); done
+                while [ ! -s ${q(completion)} ] && [ ${'$'}i -lt ${TimerTiming.COMPLETION_POLLS} ]; do sleep 0.25; i=${'$'}((i+1)); done
                 sleep 0.5
                 kill ${'$'}TL 2>/dev/null
                 sleep 0.1
@@ -53,7 +54,7 @@ internal class AdbTimerRunner(
             """.trimIndent()
             var completionValue: String? = null
             var timedOut = false
-            client.shell(script, timeoutMs = 200_000) { line ->
+            client.shell(script, timeoutMs = TimerTiming.SHELL_TIMEOUT_MS.toInt()) { line ->
                 when {
                     line == "__TZ9_TIMEOUT__" -> timedOut = true
                     line.startsWith("__TZ9_COMPLETE__") ->
@@ -63,7 +64,7 @@ internal class AdbTimerRunner(
                 }
             }
             if (timedOut) {
-                onLog("[!] Timer did not complete within 150s")
+                onLog("[!] Timer did not complete within ${TimerTiming.LOG_WATCH_MS / 1000}s")
                 return 1
             }
             if (completionValue != "1") {
@@ -103,16 +104,17 @@ internal class AdbTimerRunner(
         return result.exitCode
     }
 
-    private fun ensureTimerBinary() {
-        val check = client.exec("[ -x $TIMER_REMOTE ]")
-        if (check.exitCode == 0) return
-
-        val checkFile = client.exec("[ -f $TIMER_REMOTE ]")
-        if (checkFile.exitCode == 0) {
-            runRemote("chmod 755 $TIMER_REMOTE")
-            return
-        }
-
+    /**
+     * Stages the payload matching the running kernel.
+     *
+     * This must overwrite unconditionally.  A previous run (or an older app
+     * version) leaves `/data/local/tmp/timer` behind, and the binary is
+     * intentionally detached: it parks while holding a credential page, so it
+     * outlives the app process.  Skipping the copy when the file merely exists
+     * silently ran the *previous* native build -- the log still looked normal
+     * but none of the new plant-recovery fixes were active.
+     */
+    private fun ensureTimerBinary(onLog: (String) -> Unit = {}) {
         val asset = timerAssetFor(System.getProperty("os.version", "").orEmpty())
         val cacheDir = context.externalCacheDir ?: context.cacheDir
         val tempFile = java.io.File(cacheDir, "timer_stage")
@@ -121,13 +123,30 @@ internal class AdbTimerRunner(
                 tempFile.outputStream().use { output -> input.copyTo(output) }
             }
             runRemote("cp ${q(tempFile.absolutePath)} $TIMER_REMOTE && chmod 755 $TIMER_REMOTE")
+            onLog("<s> timer staged: $asset -> $TIMER_REMOTE")
         } finally {
             tempFile.delete()
         }
+        // The copy is unconditional, so a silent mismatch means the write
+        // failed on the device.  Surface the build tag actually on disk.
+        runCatching {
+            val probe = client.exec("$TIMER_REMOTE build", timeoutMs = 10_000)
+            probe.output.lineSequence().filter { it.startsWith("timer ") }
+                .take(2).forEach { onLog("<s> $it") }
+        }
     }
 
+    /**
+     * Waits for the manager to report a positive kernel version.
+     *
+     * A module that is loaded but not yet initialised answers
+     * `Kernel Version: 0`, so this polls for the shared confirmation window
+     * instead of sampling three times in ~1.5 s.  Getting this wrong reports a
+     * fully-rooted run as "KernelSU not confirmed".
+     */
     private fun confirmKernel(onLog: (String) -> Unit): Boolean {
-        repeat(3) { attempt ->
+        val deadline = System.nanoTime() + TimerTiming.CONFIRM_WATCH_MS * 1_000_000L
+        while (true) {
             val probe = runCatching {
                 client.exec("$KSUD_REMOTE debug version", timeoutMs = 6_000)
             }.getOrNull()
@@ -136,9 +155,9 @@ internal class AdbTimerRunner(
                 onLog("[ksu] kernel confirmed: version=$version")
                 return true
             }
-            if (attempt < 2) Thread.sleep(500)
+            if (System.nanoTime() >= deadline) return false
+            Thread.sleep(500)
         }
-        return false
     }
 
     private fun grepSeccomp(): String = runCatching {

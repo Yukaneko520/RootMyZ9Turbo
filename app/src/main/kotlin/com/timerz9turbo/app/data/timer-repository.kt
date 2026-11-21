@@ -125,11 +125,23 @@ class TimerRepository internal constructor(
                 preferences.getString("debug_export_tree_uri", null)?.let(Uri::parse))
         }.getOrNull() else null
         if (settings.exportEnabled && archive == null) onLog("<k> warning: cannot create debug log; choose Save location again")
+        var writeFailureReported = false
         val log: (String) -> Unit = { line ->
-            runCatching { archive?.append(line) }
+            val previouslyUsedFallback = archive?.usedFallback
+            val write = runCatching { archive?.append(line) }
+            if (write.isFailure && !writeFailureReported) {
+                writeFailureReported = true
+                onLog("<k> warning: cannot write debug log; file logging unavailable")
+            }
+            if (write.isSuccess && archive != null && previouslyUsedFallback == false && archive.usedFallback) {
+                onLog("<k> warning: SAF log write failed; continuing debug log: ${archive.folderPath}/${archive.displayName}")
+            }
             onLog(line)
         }
         return try {
+            if (archive?.usedFallback == true) {
+                log("<k> warning: cannot write to selected SAF folder; using MediaStore Downloads")
+            }
             log("<k> TimerZ9Turbo ${BuildConfig.VERSION_NAME}+${BuildConfig.VERSION_CODE} build ${BuildInfo.BUILD_TIME_LABEL}")
             log("<k> Device: ${Build.MANUFACTURER} ${Build.MODEL} (${Build.DEVICE})")
             log("<k> Root mode: $mode")

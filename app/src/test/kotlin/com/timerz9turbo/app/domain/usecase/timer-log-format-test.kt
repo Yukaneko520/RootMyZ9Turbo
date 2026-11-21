@@ -18,4 +18,19 @@ class TimerLogFormatTest {
     fun `ANSI sequences are stripped while retaining line separation`() {
         assertEquals("[+] writes landed\n", format("\u001b[32m[+] writes landed\u001b[0m").text)
     }
+
+    @Test
+    fun `a soft failure stays a warning even when it names a stage`() {
+        // "stage ..." used to be classified as a milestone, hiding the failure.
+        assertEquals(LogTone.Warning, format("[-] stage fake_cred out of time after 90000ms").tone)
+        assertEquals(LogTone.Warning, format("[-] plant1 unusable site0=0x1; retryable").tone)
+        assertEquals(LogTone.Warning, format("[!] no KASLR slide -- parking without reap").tone)
+    }
+
+    @Test
+    fun `completed stages and a ready spray pool read as progress not errors`() {
+        assertEquals(LogTone.Success, format("[+] stage fake_cred done in 120ms").tone)
+        assertEquals(LogTone.Success, format("[+] spray pool=2048 sockets, 256 per thread").tone)
+        assertEquals(LogTone.Progress, format("[+] plant1 spray armed, releasing target").tone)
+    }
 }

@@ -27,8 +27,10 @@ class FormatLogUseCase {
                 if (tagged.startsWith("result:")) resultTone(tagged) else LogTone.Kotlin
 
             tagged.startsWith("result:") -> resultTone(tagged)
-            isTimerMilestone(tagged) -> LogTone.Success
+            /* A soft failure can share a word with a milestone ("stage ..."),
+             * so warning classification must win over progress praise. */
             isTimerSoftFail(tagged) -> LogTone.Warning
+            isTimerMilestone(tagged) -> LogTone.Success
             isTimerProgress(tagged) -> LogTone.Progress
             marker == '+' -> LogTone.Success
             marker == '-' || marker == '!' -> LogTone.Error
@@ -45,11 +47,13 @@ class FormatLogUseCase {
     private fun isTimerMilestone(line: String): Boolean = listOf(
         "OK (attempt", "de-tag done", "writes landed", "KSU_LOADED",
         "woke uid=0 euid=0", "uid=0 euid=0", "late-load rc=0", "kill disabled",
+        "stage ", " done in ", "spray pool",
     ).any(line::contains)
 
     /* Soft failure: run continues, operator should notice (yellow, not red). */
     private fun isTimerSoftFail(line: String): Boolean = listOf(
         "retrying", "retryable", "burst missed", "holding zombie", "exec succeeded",
+        "out of time", "unusable slide", "unusable site0", "no KASLR slide",
     ).any(line::contains)
 
     private fun isTimerProgress(line: String): Boolean = listOf(

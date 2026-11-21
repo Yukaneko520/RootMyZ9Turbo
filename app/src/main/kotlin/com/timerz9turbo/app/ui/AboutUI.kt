@@ -182,8 +182,13 @@ internal fun AboutScreen(onBack: () -> Unit) {
             item(key = "licenses-title") {
                 SmallTitle(text = stringResource(R.string.about_open_source))
             }
+            item(key = "license-native") {
+                AboutLink("MIT (native timer)", "github.com/YuKongA/CVE-2026-98260/LICENSE") {
+                    uriHandler.openUri("https://github.com/YuKongA/CVE-2026-98260/blob/main/LICENSE")
+                }
+            }
             item(key = "license") {
-                AboutLink("Apache License 2.0", "github.com/YuKongA/ghostlock-app/LICENSE") {
+                AboutLink("Apache License 2.0 (app)", "github.com/YukongA/ghostlock-app/LICENSE") {
                     uriHandler.openUri("https://github.com/YuKongA/ghostlock-app/blob/main/LICENSE")
                 }
             }
