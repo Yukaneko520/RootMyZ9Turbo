@@ -30,6 +30,11 @@
  * ldr x0,[x20,#off] + bl @file 0x19f700 (ret 0x19f704) + cbz; UNIQUE match].
  * Live diag: 16 identical samples req=alloc=0x108 @low21 0x19f704 [LIVE]. */
 #define STATIC_TIMER_SITE   0xffffffc00819f704ULL
+#define TIMER_BUILD_TAG "timer-native-2.8"
+#define TIMER_PROFILE   "6.1.57"
+
+#define TIMER_SITE_FIELD_BYTES 8U
+
 #define TIMER_SITE_LOW21    0x19f704ULL
 #define TIMER_ALLOC         0x108ULL
 
@@ -56,6 +61,9 @@
  * Live diag single sample req=alloc=0x1500 @low21 0xafa48 [LIVE]. */
 #define COPY_PROCESS_LOW21  0xafa48ULL
 #define TASK_ALLOC_BYTES    0x1500ULL
+/* 6.1 sizes task_struct_cachep from arch_task_struct_size, which vendors
+ * extend; accept the observed BTF size and the usual SLUB roundups. */
+#define TASK_ALLOC_MAX      0x1780ULL
 #define FULLCAP             0x1ffffffffffULL
 
 /* Link-time symbols for the fake cred's refcounted sub-objects [DECODE @init_cred:
@@ -66,7 +74,9 @@
 #define INIT_USER_NS_STATIC 0xffffffc00a0f19c8ULL
 #define INIT_UCOUNTS_STATIC 0xffffffc00a0f3518ULL
 #define INIT_GROUPS_STATIC  0xffffffc00a0f2f88ULL
-#define SELINUX_BLOB_OFF    0x0ULL
+/* SELinux cred blob offset: 0 when it is the only cred blob, 8 when
+ * landlock precedes it.  6.1 places it at 0. */
+#define SELINUX_CRED_OFF    0x0U
 #define SELINUX_SID_KERNEL  1U
 
 /* vivo vr.ko per-task tag [VRKO]: flat lib/modules/vr.ko (LOADED one, sha d7dfb438...)

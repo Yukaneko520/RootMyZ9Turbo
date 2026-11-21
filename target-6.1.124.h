@@ -23,6 +23,11 @@
  * (cache @0xa404ea0) + mov w1,#0xdc0 + bl; matches 6.1.145 pattern].
  * Live diag: 16 identical samples req=alloc=0x108 [LIVE]. */
 #define STATIC_TIMER_SITE   0xffffffc0081a14d0ULL
+#define TIMER_BUILD_TAG "timer-native-2.8"
+#define TIMER_PROFILE   "6.1.124"
+
+#define TIMER_SITE_FIELD_BYTES 8U
+
 #define TIMER_SITE_LOW21    0x1a14d0ULL
 #define TIMER_ALLOC         0x108ULL
 
@@ -43,6 +48,9 @@
  * Live diag single sample req=alloc=0x1500 [LIVE]. */
 #define COPY_PROCESS_LOW21  0xad6e8ULL
 #define TASK_ALLOC_BYTES    0x1500ULL
+/* 6.1 sizes task_struct_cachep from arch_task_struct_size, which vendors
+ * extend; accept the observed BTF size and the usual SLUB roundups. */
+#define TASK_ALLOC_MAX      0x1780ULL
 #define FULLCAP             0x1ffffffffffULL
 
 /* Link-time symbols for the fake cred's refcounted sub-objects [DECODE @init_cred] */
@@ -50,7 +58,9 @@
 #define INIT_USER_NS_STATIC 0xffffffc00a1b0eb0ULL
 #define INIT_UCOUNTS_STATIC 0xffffffc00a1b29f8ULL
 #define INIT_GROUPS_STATIC  0xffffffc00a1b2468ULL
-#define SELINUX_BLOB_OFF    0x0ULL
+/* SELinux cred blob offset: 0 when it is the only cred blob, 8 when
+ * landlock precedes it.  6.1 places it at 0. */
+#define SELINUX_CRED_OFF    0x0U
 #define SELINUX_SID_KERNEL  1U
 
 /* thread_info 48B [BTF]: flags@0, scs_sp@32, cpu@40, pad@44.

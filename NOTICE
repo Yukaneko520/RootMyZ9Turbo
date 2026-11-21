@@ -1,0 +1,18 @@
+licensing and attribution
+
+Copyright (c) 2026 YuKongA
+
+## Scope
+
+`timer.c`, `target-*.h` and the packaged `timer-*` binaries in this directory
+are licensed under the MIT License (see LICENSE).  The `TimerZ9Turbo-src`
+Android application keeps its own Apache-2.0 LICENSE.
+
+## Third-party material
+
+- `timer.c` derives from `woshigenm/CVE-2026-98260` `src/uid0.c` and
+  `src/poc.c`, used under the MIT license.
+- The plant-recovery, 6.1 fake-cred layout and per-build profile work is
+  adapted from `YuKongA/CVE-2026-98260` (`timer/timer.c`), MIT.
+- Kernel image parsers used to derive `target-*.h` come from
+  `ghostlock-app/tools/extract_rs` (Apache-2.0).

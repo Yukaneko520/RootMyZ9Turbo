@@ -23,6 +23,11 @@
  */
 
 #define STATIC_TIMER_SITE   0xffffffc0081a2c34ULL
+#define TIMER_BUILD_TAG "timer-native-2.8"
+#define TIMER_PROFILE   "6.1.145"
+
+#define TIMER_SITE_FIELD_BYTES 8U
+
 #define TIMER_SITE_LOW21    0x1a2c34ULL
 #define TIMER_ALLOC         0x108ULL
 
@@ -40,6 +45,9 @@
 /* task alloc via dup_task_struct+0x58 ret (bl at +0x54) (kmem_cache_alloc_node), not copy_process+0x140 */
 #define COPY_PROCESS_LOW21  0xae0b0ULL
 #define TASK_ALLOC_BYTES    0x1500ULL
+/* 6.1 sizes task_struct_cachep from arch_task_struct_size, which vendors
+ * extend; accept the observed BTF size and the usual SLUB roundups. */
+#define TASK_ALLOC_MAX      0x1780ULL
 #define FULLCAP             0x1ffffffffffULL
 
 /* Link-time symbols for the fake cred's refcounted sub-objects (slide 0) */
@@ -47,7 +55,9 @@
 #define INIT_USER_NS_STATIC 0xffffffc00a1f0f30ULL
 #define INIT_UCOUNTS_STATIC 0xffffffc00a1f2a78ULL
 #define INIT_GROUPS_STATIC  0xffffffc00a1f24e8ULL
-#define SELINUX_BLOB_OFF    0x0ULL
+/* SELinux cred blob offset: 0 when it is the only cred blob, 8 when
+ * landlock precedes it.  6.1 places it at 0. */
+#define SELINUX_CRED_OFF    0x0U
 #define SELINUX_SID_KERNEL  1U
 
 /* vivo vr.ko anti-root per-task tag.
