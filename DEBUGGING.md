@@ -1,87 +1,76 @@
 # Reading a timer run log
 
-The native backend now writes enough to diagnose a failure **from the log
-alone**. `dmesg` is not required: it is lost on reboot and unreadable over adb,
-and a panic that followed a burst miss left no trace in the previous runs.
+The backend writes enough to diagnose a failure **from the log alone**; `dmesg`
+is not required because it is lost on reboot and unreadable over adb.
 
-## The one line to read first
+## The lines to read first
 
 ```
-[dbg] SUMMARY park plants=9 ok=8 miss=1 slab_busy=0 retryable=1 held=2 taint=0x100 taint_warn=1 pid=19258
+[+] pid=14171 cpu=2 nice=-20
+[ids] page_alloc=272 page_free=270 pairs=4
+[base] made=512 best=0xffffff7f80000000 count=487
+[cred] attempt=0 child=14206 R=0xffffff8935a71a80 ... task_recs=1
+[+] spray pool=2048 sockets, 256 per thread
+[+] vr de-tag: task=... (flags -> tagB -> tp)
+[+] stage fake_cred target=... mode=fake attempt=1
+[+] plant1 target=... zombie code=2 status=9
+[+] plant1 free_seen=1 burst hit=1 after 428ms
+[+] plant1 reaped status=0x9
+[+] child heartbeat: wake received
+[+] child report uid=0 euid=0 ...
+[+] Timer helper cleanup: scanned=1081 matched=8 killed=8
 ```
+
+## Per-plant fields
 
 | field | meaning |
 |---|---|
-| `plants` | total `run_plant` calls |
-| `ok` | spray won the page (write landed) |
-| `miss` | page was freed but our spray lost the race (`free_seen=1, hit=0`) |
-| `slab_busy` | slab never returned to the buddy (`free_seen=0`) |
-| `retryable` | plants that will be retried (`slab_shared` + `burst_missed`) |
-| `held` | zombies kept alive because reaping was unsafe |
-| `taint` | `/proc/sys/kernel/tainted` at exit |
-| `taint_warn` | **1 means the kernel issued a WARN during this run** |
+| `zombie code=2 status=9` | the target was SIGKILLed by the killer helper, as intended |
+| `zombie code=1 status=NN` | the exec happened instead; no stale node, the plant retries |
+| `free_seen=1` | the victim slab returned to the buddy list |
+| `free_seen=0` | somebody else still held a timer in that slab |
+| `burst hit=1` | one of our spray threads took the page, so the node is ours |
+| `burst hit=0` | the page went to a foreign caller; the plant holds its zombie and retries |
+| `reaped status=0x9` | the plant completed and the node is controlled |
+| `slab_own=N/M` | how many of the block's timers are ours (`M = 0x2000 / TIMER_ALLOC`) |
 
-`taint_warn=1` is the crucial signal. Bit 8 (`0x100`, `TAINT_WARN`) is set by
-`add_taint()` when `WARN_ON` fires — which is exactly what `timerqueue_del`
-does when the stale node is erased a second time. Because
-`/proc/sys/kernel/tainted` is readable from the shell domain, this is the only
-way to prove a WARN happened without dmesg.
+A `free_seen=0` plant that still reports `hit=1` is normal on this device: the
+page can be reclaimed before the free record is drained.
 
-## Per-plant markers
+## Where a run stops
 
-```
-[dbg] plant-entry taint=0x0 taint_warn=0 held=0
-[+] plant1 free_seen=1 burst hit=0 after 15001ms
-[dbg] plant1 failure-class=free_seen1_spray_lost
-[-] plant1 burst missed; holding zombie, retryable
-[dbg] post-plant TAINT CHANGED 0x0 -> 0x100 (new bits 0x100)
-[-] stage panic_on_warn attempt=2 failed why=burst_missed elapsed=15123ms
-```
-
-- `plant-entry` / `post-plant` bracket every plant with a taint snapshot.
-- `TAINT CHANGED` appears **only** when the kernel took a WARN during that
-  plant, so it names the plant that caused it.
-- `failure-class` separates the two ways a plant can end at `hit=0`:
-  - `free_seen1_spray_lost` — the page was freed but another caller took it.
-    The stale node now lives in memory we do not control.
-  - `free_seen0_slab_busy` — the slab never freed; the node is still intact.
-- `why=` on a failed stage is one of:
-  `trigger_never_ready`, `victim_not_captured`, `bad_base`,
-  `victim_index_missing`, `slab_shared`, `unusable_site0`,
-  `fake_cred_spills`, `fake_cred_straddles`, `blob_no_fit`,
-  `timer_go_failed`, `no_zombie`, `exec_succeeded`, `burst_missed`.
-
-## Guard around the panic path
-
-```
-[ksu] panic_on_warn=-1
-[+] stage panic_on_warn done in 1442ms (...)
-[dbg] panic_on_warn after write=0
-```
-
-The write target is `PANIC_ON_WARN_STATIC + slide`, so a wrong slide would
-silently leave the sysctl set and the next `timerqueue_del` WARN would panic.
-The backend now re-reads the sysctl and parks instead of continuing if it is
-still non-zero.
+| last line | meaning |
+|---|---|
+| `trigger never ready; retryable` | the target's exec thread never armed; nothing was planted |
+| `victim not captured` | the timers were not in the trace buffer; retried |
+| `bad base` | the linear-map vote failed; retried |
+| `timer go failed` | the go byte never reached the target; reaped and retried |
+| `no zombie; reaping and retrying` | the target never reached its exec; reaped and retried |
+| `exec succeeded; retryable` | the target ran the binary instead of being killed; reaped |
+| `burst missed; holding zombie, retryable` | the page went elsewhere; the zombie is kept, then a new plant is drawn |
+| `not retryable` | the failed attempt left a node we do not control; the run stops |
+| `no KASLR slide` | the calibration site was unusable, so no static address may be written |
 
 ## Terminal markers
 
-- `[dbg] parking reason=<why>` — the run stopped deliberately.
-- `[dbg] SUMMARY done ...` — the run finished normally.
+- `[!] <reason> -- parking without reap (zombie held)` — the run stopped
+  deliberately and the process stays parked to hold the reclaimed page. Reboot.
+- `[+] done` — a non-fake run finished and everything was reaped.
 - `[+] Timer helper cleanup: scanned=N matched=M killed=K` — `scanned` proves
-  `/proc` was actually enumerated, so `matched=0` cannot be confused with a
-  failed scan.
+  `/proc` was really enumerated, so `matched=0` cannot be a failed scan.
 
 ## What to collect if it panics again
 
-Root will not be available during the panic, so the log is the primary
-artifact. Before rebooting, if possible:
+Root will not be available during the panic, so the exported app log is the
+primary artifact. Before rebooting, if possible:
 
 ```sh
-adb shell cat /proc/sys/kernel/tainted      # 0x100 => WARN happened
+adb shell cat /proc/sys/kernel/tainted      # bit 0x200 => a WARN happened
 adb shell cat /proc/sys/kernel/panic_on_warn
 ```
 
-After reboot the only surviving evidence is the app's exported log directory
-(`Z9tb/.../timerz9turbo-timer-0.log.txt`). The `SUMMARY` and `TAINT CHANGED`
-lines in that file are what identify the offending plant.
+Note that a stale-node WARN is raised while the plant's target is reaped, so a
+kernel with `panic_on_warn=1` would lose the run at the first plant regardless
+of any userspace disarm attempt. The recorded panics include one (`023443`) that
+died before the first plant, which points at `vr.ko` and cannot be fixed from
+userspace.
