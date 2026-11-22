@@ -59,6 +59,24 @@ page can be reclaimed before the free record is drained.
 - `[+] Timer helper cleanup: scanned=N matched=M killed=K` — `scanned` proves
   `/proc` was really enumerated, so `matched=0` cannot be a failed scan.
 
+## The child never reported
+
+`n=0` is not a timeout.  It is `read()` returning 0, i.e. **EOF**: every write
+end of the report pipe is closed, so no byte can ever arrive.
+
+| log line | meaning |
+|---|---|
+| `[+] child report pipe closed before the heartbeat (n=0, EOF)` | the pipe was already dead; the child could not have written anything |
+| `[!] no child heartbeat within Nms (pipe still open)` | a real timeout; the child is alive but slow or blocked |
+| `[-] child ... write failed ret= errno=` | the child reached the write and it failed (`EPIPE` = no reader) |
+| `[!] child wake write failed ... reader already gone` | the parent could not wake the child at all |
+| `[!] child killed by signal N (...)`, | the child died from a signal instead of exiting |
+| `[+] child exit status=N` | a real exit code (only printed when `WIFEXITED`) |
+
+A child that exits 0 while the parent saw no heartbeat means the child kept
+running after a failed write, because `SIGPIPE` is ignored and the old code did
+not check the return value.  Every write is checked now.
+
 ## What to collect if it panics again
 
 Root will not be available during the panic, so the exported app log is the

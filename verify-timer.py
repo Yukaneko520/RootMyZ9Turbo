@@ -234,12 +234,30 @@ def verify_timing_bounds():
     check("now_ms() - t1 < 15000" in text, "burst poll has a 15 s ceiling")
     check("atomic_load(&g_spray_done) >= SPRAY_THREADS" in text,
           "burst poll stops once the spray has drained")
-    check("long t_end = now_ms() + 30000" in text,
-          "the heartbeat and the report share one deadline")
+    check("long t_end = t_start + 30000" in text,
+          "the heartbeat and the report share one 30 s deadline")
     # The old heartbeat probe gave up on the pipe after 5 s but then waited for
     # the child anyway, so a starved child reported "no heartbeat" and the run
     # was called a failure.  That split path must not come back.
     check("poll(&pf, 1, 5000)" not in text, "no separate 5 s heartbeat probe")
+    # EOF and a timeout are different failures: n=0 means every write end of
+    # the report pipe is closed, i.e. a dead pipe, not a slow child.
+    check("child report pipe closed before the heartbeat" in text,
+          "an EOF before the heartbeat is named as a dead pipe")
+    check("no child heartbeat within %ldms (pipe still open)" in text,
+          "a timeout is distinguished from EOF")
+    check("static int send_report(" in text,
+          "child report writes check their return value")
+    check("child heartbeat write failed ret=%zd errno=%d" in text,
+          "a failed heartbeat write names its errno")
+    check("off=%zu errno=%d" in text,
+          "a short report write is retried and names its offset")
+    check("child report pipe unusable errno=%d" in text,
+          "a broken poll is reported and aborts the wait")
+    check("reader already gone" in text,
+          "a failed wake write says whether the reader was already gone")
+    check("WIFSIGNALED(st)" in text,
+          "a signalled child is reported as a signal, not as status 0")
 
 
 def verify_cleanup():

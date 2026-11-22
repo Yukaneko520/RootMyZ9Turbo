@@ -31,10 +31,30 @@ version:
 |---|---|
 | 4 runs parked before their first plant | the unreadable `panic_on_warn` read (`-1`) is no longer a gate |
 | a 9th plant (one more WARN) in every later run | the gated duplicate `panic_on_warn` plant is gone |
-| `no child heartbeat` after 8/8 successful plants | helpers exit when their target dies; the heartbeat and the report share one 30 s deadline |
+| ~15 s of dead time per missed burst | the burst poll stops once the spray has drained |
+| orphaned helper processes burning CPU | `target_gone()` + joining only the threads that were created |
+| `no child heartbeat` with exit 0 | every child write is checked; EOF is reported as a dead pipe, not as a slow child; a signalled child is named |
 | ~15 s of dead time per missed burst | the burst poll stops once the spray has drained |
 | orphaned helper processes burning CPU | `target_gone()` + joining only the threads that were created |
 | pipes/thread joins on failure paths | every path closes its fds and joins what it created |
+
+### Why `no child heartbeat` needed a protocol fix
+
+`n=0` in `no child heartbeat (n=0)` is `read()` returning **0 = EOF**, not a
+timeout.  Every write end of the report pipe was therefore already closed.  The
+child's three report writes were `(void)write(...)`, so with `SIGPIPE` ignored a
+broken pipe came back as `EPIPE` (a return value nobody looked at) and the child
+carried on to a clean `exit 0`.  The parent then reported a missing heartbeat and
+the log contained no clue why.
+
+Now:
+
+- `send_report()` checks every write and logs `child ... write failed errno=`.
+- The heartbeat is written before `close(3)`, not after.
+- The parent distinguishes `child report pipe closed ... (n=0, EOF)` from
+  `no child heartbeat within Nms (pipe still open)`.
+- A failed wake names whether the reader was already gone.
+- `waitpid` reports a signalled child as a signal instead of `status=0`.
 
 The plant sequence in the fake path is down from 9 writes to 7:
 
