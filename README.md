@@ -34,11 +34,10 @@ version:
 | ~15 s of dead time per missed burst | the burst poll stops once the spray has drained |
 | orphaned helper processes burning CPU | `target_gone()` + joining only the threads that were created |
 | `no child heartbeat` with exit 0 | every child write is checked; EOF is reported as a dead pipe, not as a slow child; a signalled child is named |
-| ~15 s of dead time per missed burst | the burst poll stops once the spray has drained |
-| orphaned helper processes burning CPU | `target_gone()` + joining only the threads that were created |
 | pipes/thread joins on failure paths | every path closes its fds and joins what it created |
 | `off=0xff0` victim: 2 fails + 1 panic out of 3 runs | a cred that straddles a 4 KiB page is rejected before arming, so another victim is drawn |
 | a successful run ending in `[!] ... reboot to clean` | the expected park uses `[*]` (warning), not `[!]` (error) |
+| `uid=-119` after a good-looking run | the lost `fake_uid` write is named instead of failing later in ksud |
 
 ### Why `no child heartbeat` needed a protocol fix
 

