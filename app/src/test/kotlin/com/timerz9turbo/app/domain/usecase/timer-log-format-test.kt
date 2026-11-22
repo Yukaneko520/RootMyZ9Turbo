@@ -29,9 +29,24 @@ class TimerLogFormatTest {
 
     @Test
     fun `completed stages and a ready spray pool read as progress not errors`() {
-        assertEquals(LogTone.Success, format("[+] stage fake_cred target=0x1 mode=fake attempt=1").tone)
+        assertEquals(LogTone.Success, format("[+] stage fake_cred done in 120ms").tone)
         assertEquals(LogTone.Success, format("[+] spray pool=2048 sockets, 256 per thread").tone)
         assertEquals(LogTone.Success, format("[+] child heartbeat: wake received").tone)
         assertEquals(LogTone.Progress, format("[+] plant1 spray armed, releasing target").tone)
+        assertEquals(LogTone.Progress, format("[+] stage fake_cred target=0x1 mode=fake attempt=1").tone)
+    }
+
+    @Test
+    fun `the binary failure marker wins over a milestone phrase`() {
+        // Regression: "no child heartbeat" contains the milestone phrase
+        // "child heartbeat", so a milestone match first painted it green.
+        assertEquals(LogTone.Error, format("[!] no child heartbeat (n=0)").tone)
+        assertEquals(LogTone.Error, format("[!] child report missing (got=0/32)").tone)
+        assertEquals(LogTone.Error, format("[!] fake cred page held; reboot to clean").tone)
+        // A retry is a soft failure, not a hard error.
+        assertEquals(LogTone.Warning, format("[-] plant1 exec succeeded (status=42); retryable").tone)
+        // The success twin of the same phrase must stay green.
+        assertEquals(LogTone.Success, format("[+] child heartbeat: wake received").tone)
+        assertEquals(LogTone.Success, format("[+] child report uid=0 euid=0 resuid=0/0/0").tone)
     }
 }

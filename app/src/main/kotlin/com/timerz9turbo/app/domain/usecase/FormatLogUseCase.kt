@@ -27,13 +27,20 @@ class FormatLogUseCase {
                 if (tagged.startsWith("result:")) resultTone(tagged) else LogTone.Kotlin
 
             tagged.startsWith("result:") -> resultTone(tagged)
-            /* A soft failure can share a word with a milestone ("stage ..."),
-             * so warning classification must win over progress praise. */
+            /*
+             * Order matters here, and the recorded logs pinned it:
+             *  1. A soft failure is a warning even when it repeats a milestone
+             *     word ("stage ... failed, retrying").
+             *  2. `[!]` / `[-]` are the binary's failure markers.  "no child
+             *     heartbeat" contains the milestone phrase "child heartbeat",
+             *     so a milestone match allowed first painted a failed run green.
+             *  3. Milestones and progress only refine a non-failing line.
+             */
             isTimerSoftFail(tagged) -> LogTone.Warning
+            marker == '-' || marker == '!' -> LogTone.Error
             isTimerMilestone(tagged) -> LogTone.Success
             isTimerProgress(tagged) -> LogTone.Progress
             marker == '+' -> LogTone.Success
-            marker == '-' || marker == '!' -> LogTone.Error
             marker == '*' -> LogTone.Warning
             body.startsWith("error", ignoreCase = true) -> LogTone.Error
             body.startsWith("warning", ignoreCase = true) -> LogTone.Warning
@@ -42,12 +49,16 @@ class FormatLogUseCase {
         return LogEntry(text, tone)
     }
 
-
-    /* Timer binary vocabulary: [+] is routine progress, milestones are explicit. */
+    /*
+     * Milestones are matched only on positive lines: a `[!]` marker is already
+     * an error, and a soft failure is checked first, so a phrase shared by a
+     * success and a failure cannot hide the failure.
+     */
     private fun isTimerMilestone(line: String): Boolean = listOf(
         "OK (attempt", "de-tag done", "writes landed", "KSU_LOADED",
         "woke uid=0 euid=0", "uid=0 euid=0", "late-load rc=0", "kill disabled",
-        "stage ", "spray pool", "child heartbeat", "child report",
+        "done in", "spray pool", "heartbeat: wake received",
+        "child report uid=", "fake cred A=",
     ).any(line::contains)
 
     /* Soft failure: run continues, operator should notice (yellow, not red). */
