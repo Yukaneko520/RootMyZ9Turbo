@@ -12,7 +12,8 @@ Every claim below is tied to a recorded run in `../timerZ9Turbo-log`.
 | `euid=-118`, `uid=-119`, `2000/2000` after a "done" write | `223620` `011900` `023944` `002036` `012408` `013001` | a plant can win the page and still miss the erase; the two credential repairs are then silently lost. Inherent to the design, but they are retried now. |
 | 7-8 plants all OK, then `no child heartbeat`, child exits 0 | `013740` `022844` `023731` `134538` `140118` | **not** helper starvation (an earlier claim in this file, now withdrawn). `n=0` is EOF: every write end of the report pipe was already closed. Every child write was `(void)write(...)`, and with `SIGPIPE` ignored a broken pipe returns EPIPE instead of killing the child, so the child ran to completion and exited 0 while the parent saw nothing. The pipe is now checked and both sides name the errno. |
 | ~15 s of dead time per missed burst | 16 of 273 recorded bursts, all `15001..15497 ms` | the poll keeps waiting after every spray thread finished writing; no further allocation of ours is possible then. |
-| Panics | 6/38 | each plant leaves one stale node and therefore one `timerqueue_del` WARN. Fewer plants = fewer WARNs = fewer chances to panic. One panic (`023443`) happened before any plant, so a kernel-side actor (`vr.ko`) is also involved. |
+| Panics | 6/38 | each plant leaves one stale node and therefore one `timerqueue_del` WARN. Fewer plants = fewer WARNs = fewer chances to panic. |
+| Panic at `stage selinux` | `160735` (`off=0xff0`) | the fake cred straddled a 4 KiB page: `off + CRED_REQ` crossed `0x1000`. All three runs with a straddling cred failed, and one of them panicked. A victim can be drawn again before arming, so the offset is now rejected up front. |
 
 ## Changes
 

@@ -258,6 +258,12 @@ def verify_timing_bounds():
           "a failed wake write says whether the reader was already gone")
     check("WIFSIGNALED(st)" in text,
           "a signalled child is reported as a signal, not as status 0")
+    check("static void park_expected(" in text,
+          "a successful park is reported separately from a failure")
+    check('logf("[*] %s -- parking as designed' in text,
+          "the expected park uses the warning marker, not [!]")
+    check("fake cred straddles a page off=%#zx; retryable" in text,
+          "a page-straddling fake cred is rejected before arming")
 
 
 def verify_cleanup():

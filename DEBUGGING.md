@@ -53,11 +53,24 @@ page can be reclaimed before the free record is drained.
 
 ## Terminal markers
 
-- `[!] <reason> -- parking without reap (zombie held)` — the run stopped
-  deliberately and the process stays parked to hold the reclaimed page. Reboot.
+- `[*] <reason> -- parking as designed (fake cred page held)` — the run
+  **succeeded**. The fake endgame must keep the reclaimed page mapped, so the
+  process stays parked. This is a warning, not an error. Reboot when convenient.
+- `[!] <reason> -- parking without reap (zombie held)` — the run **failed** and
+  the process stays parked to hold the page.
 - `[+] done` — a non-fake run finished and everything was reaped.
 - `[+] Timer helper cleanup: scanned=N matched=M killed=K` — `scanned` proves
   `/proc` was really enumerated, so `matched=0` cannot be a failed scan.
+
+## Why `off=0xff0` matters
+
+`off` is where the fake cred lands inside the 8 KiB reclaimed block:
+`off = (V & 0x1fff) + 0x78`. The cred is `CRED_REQ` (0xb8) bytes, so when
+`(off & 0xfff) + CRED_REQ > 0x1000` it spans two 4 KiB pages of that block.
+Every recorded run with such a victim failed (`uid=2000/2000` or `0/-118`), and
+`160735` panicked at `stage selinux` with `off=0xff0`.  A plant whose offset
+crosses a page boundary is now rejected before the arm/reap, and another victim
+is drawn — that costs no node and no WARN.
 
 ## The child never reported
 
