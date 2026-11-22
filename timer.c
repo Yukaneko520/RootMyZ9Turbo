@@ -1904,8 +1904,19 @@ static int wait_child_main(const char *mode)
     rep.uid = (int)syscall(SYS_getuid);
     rep.euid = (int)syscall(SYS_geteuid);
     logf("[child] woke uid=%d euid=%d\n", rep.uid, rep.euid);
-    /* Effective root is what grants capabilities; accept euid==0 even if the
-     * real-uid word write raced. The shell below still runs as euid 0. */
+    /*
+     * Effective root is what grants capabilities, so euid==0 is the gate.
+     *
+     * A real uid that did not reach 0 is NOT repaired here.  `setuid(0)`
+     * would rewrite the cred through commit_creds, which re-tags the task and
+     * lets vr.ko's sys_exit probe kill it -- that is the whole reason the
+     * direct-cred path avoids the call.  The fake path must not reintroduce it.
+     * A uid that stayed at high32(A) is named below instead, so the failure is
+     * visible rather than acted on.
+     */
+    if (rep.uid != 0)
+        logf("[-] child real uid is %d (fake_uid write lost); leaving it alone "
+             "to avoid re-tagging the task\n", rep.uid);
     if (rep.euid != 0)
     {
         rep.setuid_ret = -1;
@@ -2623,6 +2634,27 @@ int main(int argc, char **argv)
             logf("[+] child report uid=%d euid=%d setuid(0)=%d errno=%d resuid=%d/%d/%d\n",
                  rep.uid, rep.euid, rep.setuid_ret, rep.setuid_errno,
                  rep.ruid, rep.reuid, rep.rsuid);
+            /*
+             * A bad real uid is not cosmetic.  Across every recorded run the
+             * two are perfectly correlated:
+             *
+             *     uid  euid  CapEff  outcome
+             *     0    0     full    OK      (20 runs)
+             *     -119 0     EMPTY   FAIL    (023944, 170424)
+             *
+             * uid==-119 is high32(A), the value rb_erase left in the cred, so
+             * it names a lost `fake_uid` write.  The empty CapEff shows the
+             * capability block did not survive the child's fork either, and
+             * `id` rejects the bogus uid, so KernelSU never comes up.
+             *
+             * It cannot be repaired from here: setuid(0) re-enters
+             * commit_creds, re-tags the task and lets vr.ko kill the child.
+             * It is reported instead of retried, because the run is lost the
+             * moment the fake_uid plant misses.
+             */
+            if (rep.uid != 0)
+                logf("[!] fake_uid write lost: uid=%d (expected 0); this run "
+                     "cannot root, reboot and retry\n", rep.uid);
             if (rep.setuid_ret != 0 || rep.reuid != 0)
                 logf("[!] child did not reach euid 0\n");
         }

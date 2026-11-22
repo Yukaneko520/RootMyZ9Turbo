@@ -264,6 +264,8 @@ def verify_timing_bounds():
           "the expected park uses the warning marker, not [!]")
     check("fake cred straddles a page off=%#zx; retryable" in text,
           "a page-straddling fake cred is rejected before arming")
+    check("fake_uid write lost: uid=%d" in text,
+          "a lost fake_uid write is reported as a lost root, not retried")
 
 
 def verify_cleanup():

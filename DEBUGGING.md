@@ -81,14 +81,33 @@ end of the report pipe is closed, so no byte can ever arrive.
 |---|---|
 | `[+] child report pipe closed before the heartbeat (n=0, EOF)` | the pipe was already dead; the child could not have written anything |
 | `[!] no child heartbeat within Nms (pipe still open)` | a real timeout; the child is alive but slow or blocked |
-| `[-] child ... write failed ret= errno=` | the child reached the write and it failed (`EPIPE` = no reader) |
+| `[!] child report pipe unusable errno=` | `poll`/`read` failed; the factory fd is not usable |
+| `[-] child ... write failed off=N errno=` | the child reached the write and it failed (`EPIPE` = no reader) |
 | `[!] child wake write failed ... reader already gone` | the parent could not wake the child at all |
-| `[!] child killed by signal N (...)`, | the child died from a signal instead of exiting |
+| `[!] child killed by signal N (...)` | the child died from a signal instead of exiting |
 | `[+] child exit status=N` | a real exit code (only printed when `WIFEXITED`) |
 
 A child that exits 0 while the parent saw no heartbeat means the child kept
 running after a failed write, because `SIGPIPE` is ignored and the old code did
 not check the return value.  Every write is checked now.
+
+## `uid=-119` after a successful-looking run
+
+`[!] fake_uid write lost: uid=-119` means one specific plant missed.  It is not
+cosmetic and not retried:
+
+- `-119` is `high32(A)`, the value `rb_erase` left in the cred, so the
+  `fake_uid` zero write never landed.
+- Across every recorded run, a bad `uid` and an empty `CapEff` occur together
+  (20 runs `uid=0` + full caps, 2 runs `uid=-119` + empty caps), and `id`
+  rejects the bogus uid, so KernelSU cannot come up.
+- It cannot be repaired with `setuid(0)` from the child: that re-enters
+  `commit_creds`, re-tags the task, and lets vr.ko's `sys_exit` probe kill it.
+  That is the whole reason the direct-cred path avoids the call.
+
+The plant wins ~97% of the time (1 loss in 29 installed fake creds), so the
+answer is to reboot and retry rather than to add a plant -- each extra plant
+costs one more stale node and one more `timerqueue_del` WARN.
 
 ## What to collect if it panics again
 
